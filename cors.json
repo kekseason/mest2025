@@ -1,0 +1,8 @@
+[
+  {
+    "origin": ["https://mest-8a3c7.web.app"],
+    "method": ["GET", "PUT", "POST", "DELETE", "HEAD"],
+    "responseHeader": ["Content-Type", "Authorization"],
+    "maxAgeSeconds": 3600
+  }
+]
