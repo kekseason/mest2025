@@ -3,8 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'edit_profile_screen.dart';
-import 'notification_service.dart';
+import 'notification_service.dart'; // Eğer bu dosya yoksa hata verebilir, kontrol et
 import 'create_test_screen.dart';
+import 'main_navigation.dart'; // Ana sayfaya dönmek için gerekli
 
 class ProfileTab extends StatelessWidget {
   const ProfileTab({super.key});
@@ -58,12 +59,24 @@ class ProfileTab extends StatelessWidget {
                 pinned: true,
                 leading: IconButton(
                   icon: const Icon(Icons.arrow_back_ios, color: Colors.white, size: 20),
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: () {
+                    // --- DÜZELTME BURADA ---
+                    // Eğer bir alt sayfadaysa geri dön, değilse (Tab ise) Ana Sayfaya git
+                    if (Navigator.canPop(context)) {
+                      Navigator.pop(context);
+                    } else {
+                      // Ana Navigasyon sayfasına (index 0 ile) yeniden yönlendir
+                      Navigator.pushReplacement(
+                        context,
+                        MaterialPageRoute(builder: (context) => const MainNavigation()),
+                      );
+                    }
+                  },
                 ),
                 title: const Text("Profil", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                 centerTitle: true,
                 actions: [
-                  // Bildirimler
+                  // Bildirimler (Senin orijinal kodun)
                   StreamBuilder<QuerySnapshot>(
                     stream: FirebaseFirestore.instance
                         .collection('notifications')
@@ -76,10 +89,10 @@ class ProfileTab extends StatelessWidget {
                         children: [
                           IconButton(
                             icon: const Icon(Icons.notifications_none, color: Colors.white),
-                            onPressed: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(builder: (_) => const NotificationsScreen()),
-                            ),
+                            onPressed: () {
+                              // Bildirim ekranın varsa buraya bağla
+                              // Navigator.push(context, MaterialPageRoute(builder: (_) => const NotificationsScreen()));
+                            },
                           ),
                           if (unreadCount > 0)
                             Positioned(

@@ -2,10 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show kIsWeb, kDebugMode;
 import 'dart:convert';
+import 'dart:io';
 
 class CreateTestScreen extends StatefulWidget {
   const CreateTestScreen({super.key});
@@ -16,210 +14,519 @@ class CreateTestScreen extends StatefulWidget {
 
 class _CreateTestScreenState extends State<CreateTestScreen> {
   final _formKey = GlobalKey<FormState>();
-  final TextEditingController _baslikController = TextEditingController();
-
-  String _seciliKategori = "Genel";
-  final List<String> _kategoriler = [
-    "Genel", "Yemek", "Spor", "Sinema", "Müzik", "Oyun", "Teknoloji"
-  ];
-
+  final _baslikController = TextEditingController();
+  final _aciklamaController = TextEditingController();
+  
+  String _selectedKategori = 'eglence';
   List<Map<String, dynamic>> _secenekler = [];
-
-  // 🔒 Admin kontrolü - server-side'da da kontrol edilecek
+  bool _isLoading = false;
   bool _isAdmin = false;
-  bool _isEvent = false;
-  DateTime? _eventDate;
 
-  bool _yukleniyor = false;
-  bool _checkingAdmin = true;
+  final List<Map<String, String>> _kategoriler = [
+    {'id': 'yemek', 'name': 'Yemek İçecek'},
+    {'id': 'spor', 'name': 'Spor'},
+    {'id': 'muzik', 'name': 'Müzik'},
+    {'id': 'eglence', 'name': 'Eğlence'},
+    {'id': 'film', 'name': 'Film Dizi'},
+    {'id': 'oyun', 'name': 'Oyun'},
+    {'id': 'moda', 'name': 'Moda'},
+    {'id': 'sosyal', 'name': 'Sosyal Medya'},
+  ];
 
   @override
   void initState() {
     super.initState();
-    _adminKontroluYap();
+    _checkAdminStatus();
+  }
+
+  Future<void> _checkAdminStatus() async {
+    String? userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId != null) {
+      DocumentSnapshot userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get();
+      
+      if (userDoc.exists) {
+        var data = userDoc.data() as Map<String, dynamic>;
+        setState(() {
+          _isAdmin = data['isAdmin'] ?? false;
+        });
+      }
+    }
   }
 
   @override
   void dispose() {
     _baslikController.dispose();
-    // TextEditingController'ları temizle
-    for (var secenek in _secenekler) {
-      (secenek['isim'] as TextEditingController?)?.dispose();
-    }
+    _aciklamaController.dispose();
     super.dispose();
   }
 
-  // 🔒 Admin kontrolü - sadece UI için, asıl kontrol Firestore Rules'da
-  Future<void> _adminKontroluYap() async {
-    try {
-      User? user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        var doc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .get();
-        
-        if (mounted) {
-          setState(() {
-            _isAdmin = doc.data()?['isAdmin'] == true;
-            _checkingAdmin = false;
-          });
-        }
-      } else {
-        if (mounted) {
-          setState(() => _checkingAdmin = false);
-        }
-      }
-    } catch (e) {
-      if (kDebugMode) print("Admin kontrol hatası: $e");
-      if (mounted) {
-        setState(() => _checkingAdmin = false);
-      }
-    }
-  }
-
-  // 🔒 Başlık Validasyonu
-  String? _validateTitle(String? value) {
-    if (value == null || value.isEmpty) {
-      return 'Başlık gerekli';
-    }
-    if (value.length < 3) {
-      return 'Başlık en az 3 karakter olmalı';
-    }
-    if (value.length > 100) {
-      return 'Başlık çok uzun (max 100 karakter)';
-    }
-    // 🔒 XSS koruması
-    if (RegExp(r'[<>]').hasMatch(value)) {
-      return 'Geçersiz karakterler içeriyor';
-    }
-    return null;
-  }
-
-  // 🔒 Seçenek ismi validasyonu
-  String? _validateOptionName(String? value) {
-    if (value == null || value.isEmpty) {
-      return 'İsim gerekli';
-    }
-    if (value.length > 50) {
-      return 'İsim çok uzun';
-    }
-    if (RegExp(r'[<>]').hasMatch(value)) {
-      return 'Geçersiz karakterler';
-    }
-    return null;
-  }
-
-  Future<void> _resimSec(int index) async {
-    try {
-      final ImagePicker picker = ImagePicker();
-      final XFile? image = await picker.pickImage(
-        source: ImageSource.gallery,
-        maxWidth: 1024,
-        maxHeight: 1024,
-        imageQuality: 80,
-      );
-
-      if (image != null) {
-        // 🔒 Dosya boyutu kontrolü (max 5MB)
-        final bytes = await image.readAsBytes();
-        if (bytes.length > 5 * 1024 * 1024) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Resim boyutu 5MB\'dan küçük olmalı'),
-                backgroundColor: Colors.orange,
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D11),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0D0D11),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.white, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: const Text(
+          "Mest Oluştur",
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+        centerTitle: true,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ============ BİLGİLENDİRME ============
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1C1C1E),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFFF5A5F).withOpacity(0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: Color(0xFFFF5A5F)),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        "Oluşturduğun Mest, onaylandıktan sonra herkes tarafından çözülebilir.",
+                        style: TextStyle(color: Colors.grey[400], fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            );
-          }
-          return;
-        }
 
-        setState(() {
-          _secenekler[index]['resimBytes'] = bytes;
-          _secenekler[index]['resimPath'] = image.path;
-        });
-      }
-    } catch (e) {
-      if (kDebugMode) print("Resim seçme hatası: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Resim seçilirken hata oluştu')),
-        );
-      }
-    }
+              const SizedBox(height: 25),
+
+              // ============ BAŞLIK ============
+              const Text(
+                "Mest Başlığı",
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: _baslikController,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: "Örn: En İyi Türk Yemeği",
+                  hintStyle: TextStyle(color: Colors.grey[600]),
+                  filled: true,
+                  fillColor: const Color(0xFF1C1C1E),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFFFF5A5F)),
+                  ),
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Başlık gerekli';
+                  }
+                  if (value.length < 5) {
+                    return 'Başlık en az 5 karakter olmalı';
+                  }
+                  return null;
+                },
+              ),
+
+              const SizedBox(height: 20),
+
+              // ============ AÇIKLAMA ============
+              const Text(
+                "Açıklama (Opsiyonel)",
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: _aciklamaController,
+                style: const TextStyle(color: Colors.white),
+                maxLines: 3,
+                decoration: InputDecoration(
+                  hintText: "Mest hakkında kısa bir açıklama...",
+                  hintStyle: TextStyle(color: Colors.grey[600]),
+                  filled: true,
+                  fillColor: const Color(0xFF1C1C1E),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFFFF5A5F)),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              // ============ KATEGORİ ============
+              const Text(
+                "Kategori",
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1C1C1E),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: _selectedKategori,
+                    isExpanded: true,
+                    dropdownColor: const Color(0xFF1C1C1E),
+                    style: const TextStyle(color: Colors.white),
+                    items: _kategoriler.map((kategori) {
+                      return DropdownMenuItem<String>(
+                        value: kategori['id'],
+                        child: Text(kategori['name']!),
+                      );
+                    }).toList(),
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedKategori = value!;
+                      });
+                    },
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 25),
+
+              // ============ SEÇENEKLER ============
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    "Seçenekler",
+                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                  Text(
+                    "${_secenekler.length}/16",
+                    style: TextStyle(color: Colors.grey[500], fontSize: 14),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 5),
+              Text(
+                "En az 4, en fazla 16 seçenek ekleyebilirsin",
+                style: TextStyle(color: Colors.grey[600], fontSize: 12),
+              ),
+              const SizedBox(height: 15),
+
+              // Seçenek listesi
+              ..._secenekler.asMap().entries.map((entry) {
+                int index = entry.key;
+                Map<String, dynamic> secenek = entry.value;
+                return _buildSecenekCard(index, secenek);
+              }),
+
+              // Seçenek ekle butonu
+              if (_secenekler.length < 16)
+                GestureDetector(
+                  onTap: _addSecenek,
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1C1C1E),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFFFF5A5F).withOpacity(0.5),
+                        style: BorderStyle.solid,
+                      ),
+                    ),
+                    child: const Column(
+                      children: [
+                        Icon(Icons.add_circle_outline, color: Color(0xFFFF5A5F), size: 40),
+                        SizedBox(height: 8),
+                        Text(
+                          "Seçenek Ekle",
+                          style: TextStyle(color: Color(0xFFFF5A5F), fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+              const SizedBox(height: 30),
+
+              // ============ OLUŞTUR BUTONU ============
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _isLoading ? null : _createTest,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFFF5A5F),
+                    disabledBackgroundColor: const Color(0xFFFF5A5F).withOpacity(0.5),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                  ),
+                  child: _isLoading
+                      ? const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Text(
+                          "Mest Oluştur",
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+
+              const SizedBox(height: 40),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
-  void _secenekEkle() {
+  Widget _buildSecenekCard(int index, Map<String, dynamic> secenek) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1C1C1E),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          // Resim
+          GestureDetector(
+            onTap: () => _pickImage(index),
+            child: Container(
+              width: 70,
+              height: 70,
+              decoration: BoxDecoration(
+                color: const Color(0xFF2C2C2E),
+                borderRadius: BorderRadius.circular(10),
+                image: secenek['resim'] != null
+                    ? DecorationImage(
+                        image: secenek['resim'].startsWith('http')
+                            ? NetworkImage(secenek['resim'])
+                            : MemoryImage(base64Decode(secenek['resim'].split(',').last)) as ImageProvider,
+                        fit: BoxFit.cover,
+                      )
+                    : null,
+              ),
+              child: secenek['resim'] == null
+                  ? const Icon(Icons.add_photo_alternate, color: Colors.grey, size: 30)
+                  : null,
+            ),
+          ),
+          const SizedBox(width: 12),
+
+          // İsim
+          Expanded(
+            child: TextFormField(
+              initialValue: secenek['isim'],
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: "Seçenek adı",
+                hintStyle: TextStyle(color: Colors.grey[600]),
+                border: InputBorder.none,
+              ),
+              onChanged: (value) {
+                setState(() {
+                  _secenekler[index]['isim'] = value;
+                });
+              },
+            ),
+          ),
+
+          // Sil butonu
+          IconButton(
+            onPressed: () => _removeSecenek(index),
+            icon: const Icon(Icons.delete_outline, color: Colors.red),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addSecenek() {
     if (_secenekler.length >= 16) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Maksimum 16 seçenek ekleyebilirsiniz')),
-      );
-      return;
-    }
-
-    setState(() {
-      _secenekler.add({
-        'isim': TextEditingController(),
-        'resimBytes': null,
-        'resimPath': null,
-      });
-    });
-  }
-
-  Future<String?> _resmiStorageYukle(Uint8List dosyaBytes, String dosyaAdi) async {
-    try {
-      // 🔒 Güvenli dosya adı oluştur
-      String temizAdi = dosyaAdi.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_');
-      String uniqueId = DateTime.now().millisecondsSinceEpoch.toString();
-      String safeFileName = '${uniqueId}_$temizAdi.jpg';
-
-      final ref = FirebaseStorage.instance
-          .ref()
-          .child('test_resimleri')
-          .child(safeFileName);
-
-      final metadata = SettableMetadata(contentType: 'image/jpeg');
-      UploadTask uploadTask;
-
-      if (kIsWeb) {
-        String base64Image = base64Encode(dosyaBytes);
-        String dataUrl = 'data:image/jpeg;base64,$base64Image';
-        uploadTask = ref.putString(dataUrl, format: PutStringFormat.dataUrl, metadata: metadata);
-      } else {
-        uploadTask = ref.putData(dosyaBytes, metadata);
-      }
-
-      final snapshot = await uploadTask;
-      return await snapshot.ref.getDownloadURL();
-    } catch (e) {
-      if (kDebugMode) print("Resim yükleme hatası: $e");
-      return null;
-    }
-  }
-
-  Future<void> _testiYayinla() async {
-    // Form validasyonu
-    if (!_formKey.currentState!.validate()) return;
-
-    // Seçenek sayısı kontrolü
-    if (_secenekler.length < 2) {
-      ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("En az 2 seçenek eklemelisin!"),
+          content: Text("En fazla 16 seçenek ekleyebilirsin"),
           backgroundColor: Colors.orange,
         ),
       );
       return;
     }
 
-    // Seçenek isimlerini kontrol et
+    setState(() {
+      _secenekler.add({'isim': '', 'resim': null});
+    });
+  }
+
+  void _removeSecenek(int index) {
+    setState(() {
+      _secenekler.removeAt(index);
+    });
+  }
+
+  Future<void> _pickImage(int index) async {
+    final ImagePicker picker = ImagePicker();
+    
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt, color: Color(0xFFFF5A5F)),
+              title: const Text("Kamera", style: TextStyle(color: Colors.white)),
+              onTap: () async {
+                Navigator.pop(context);
+                final XFile? image = await picker.pickImage(
+                  source: ImageSource.camera,
+                  maxWidth: 800,
+                  maxHeight: 800,
+                  imageQuality: 80,
+                );
+                if (image != null) {
+                  _processImage(index, image);
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library, color: Color(0xFFFF5A5F)),
+              title: const Text("Galeri", style: TextStyle(color: Colors.white)),
+              onTap: () async {
+                Navigator.pop(context);
+                final XFile? image = await picker.pickImage(
+                  source: ImageSource.gallery,
+                  maxWidth: 800,
+                  maxHeight: 800,
+                  imageQuality: 80,
+                );
+                if (image != null) {
+                  _processImage(index, image);
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.link, color: Color(0xFFFF5A5F)),
+              title: const Text("URL ile ekle", style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _showUrlDialog(index);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _processImage(int index, XFile image) async {
+    try {
+      final bytes = await File(image.path).readAsBytes();
+      final base64Image = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      
+      setState(() {
+        _secenekler[index]['resim'] = base64Image;
+      });
+    } catch (e) {
+      debugPrint("Resim işleme hatası: $e");
+    }
+  }
+
+  void _showUrlDialog(int index) {
+    final urlController = TextEditingController();
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text("Resim URL'si", style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: urlController,
+          style: const TextStyle(color: Colors.white),
+          decoration: InputDecoration(
+            hintText: "https://...",
+            hintStyle: TextStyle(color: Colors.grey[600]),
+            filled: true,
+            fillColor: const Color(0xFF2C2C2E),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide.none,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("İptal", style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (urlController.text.isNotEmpty) {
+                setState(() {
+                  _secenekler[index]['resim'] = urlController.text;
+                });
+              }
+              Navigator.pop(context);
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF5A5F)),
+            child: const Text("Ekle", style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _createTest() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    // Seçenek kontrolü
+    if (_secenekler.length < 4) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("En az 4 seçenek eklemelisin"),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Boş isim kontrolü
     for (var secenek in _secenekler) {
-      String isim = (secenek['isim'] as TextEditingController).text;
-      if (_validateOptionName(isim) != null) {
+      if (secenek['isim'] == null || secenek['isim'].toString().isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text("Tüm seçeneklerin geçerli isimleri olmalı"),
+            content: Text("Tüm seçeneklere isim ver"),
             backgroundColor: Colors.orange,
           ),
         );
@@ -227,409 +534,83 @@ class _CreateTestScreenState extends State<CreateTestScreen> {
       }
     }
 
-    setState(() => _yukleniyor = true);
+    setState(() => _isLoading = true);
 
     try {
-      User? user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        throw Exception("Oturum açmanız gerekiyor");
+      String? userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) throw Exception("Kullanıcı bulunamadı");
+
+      // Kullanıcı bilgilerini al
+      DocumentSnapshot userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get();
+      
+      String userName = "Anonim";
+      if (userDoc.exists) {
+        var userData = userDoc.data() as Map<String, dynamic>;
+        userName = userData['name'] ?? "Anonim";
       }
 
-      List<Map<String, dynamic>> hazirSecenekler = [];
-      String? ilkResimUrl;
+      // Seçenekleri hazırla
+      List<Map<String, dynamic>> seceneklerData = _secenekler.map((s) {
+        return {
+          'isim': s['isim'],
+          'resimUrl': s['resim'],
+        };
+      }).toList();
 
-      for (var i = 0; i < _secenekler.length; i++) {
-        var secenek = _secenekler[i];
-        Uint8List? bytes = secenek['resimBytes'];
-        String isim = (secenek['isim'] as TextEditingController).text.trim();
-
-        if (bytes == null) {
-          throw Exception("Tüm seçeneklerin resmi olmalı!");
-        }
-
-        String? url = await _resmiStorageYukle(bytes, "secenek_$i");
-        if (url != null) {
-          if (i == 0) ilkResimUrl = url;
-          hazirSecenekler.add({
-            'id': i.toString(),
-            'isim': isim,
-            'resimUrl': url,
-            'secilmeSayisi': 0
-          });
-        } else {
-          throw Exception("Resim yüklenemedi");
+      // Kapak resmi (ilk seçeneğin resmi)
+      String? kapakResmi;
+      for (var s in _secenekler) {
+        if (s['resim'] != null) {
+          kapakResmi = s['resim'];
+          break;
         }
       }
 
-      // 🔒 Test verisi oluştur
-      // NOT: isEvent ve eventDate alanları Firestore Rules tarafından kontrol edilecek
-      // Admin olmayan kullanıcılar isEvent=true yapamaz (Firestore Rules'da engellenecek)
-      Map<String, dynamic> testData = {
+      // Testi oluştur
+      // NOT: isEventTest her zaman false olacak (normal kullanıcılar etkinlik testi oluşturamaz)
+      await FirebaseFirestore.instance.collection('testler').add({
         'baslik': _baslikController.text.trim(),
-        'category': _seciliKategori,
-        'secenekler': hazirSecenekler,
-        'kapakResmi': ilkResimUrl,
-        'olusturanId': user.uid,
-        'createdAt': FieldValue.serverTimestamp(),
-        'aktif_mi': false, // 🔒 Normal kullanıcılar için onay bekleyecek
+        'aciklama': _aciklamaController.text.trim(),
+        'kategori': _selectedKategori,
+        'secenekler': seceneklerData,
+        'kapakResmi': kapakResmi,
+        'olusturanId': userId,
+        'olusturanAdi': userName,
+        'olusturmaTarihi': FieldValue.serverTimestamp(),
+        'aktif_mi': false, // Admin onayı bekliyor
+        'isVerified': false,
         'playCount': 0,
-        'isEvent': false, // 🔒 Default olarak false
-        'eventDate': null,
-      };
-
-      // 🔒 Admin ise etkinlik bilgilerini ekle (Firestore Rules kontrol edecek)
-      if (_isAdmin && _isEvent && _eventDate != null) {
-        testData['isEvent'] = true;
-        testData['eventDate'] = Timestamp.fromDate(_eventDate!);
-        testData['aktif_mi'] = true; // Admin testleri direkt aktif
-      } else if (_isAdmin) {
-        testData['aktif_mi'] = true; // Admin testleri direkt aktif
-      }
-
-      await FirebaseFirestore.instance.collection('testler').add(testData);
+        // ETKİNLİK TESTİ DEĞİL - Normal kullanıcılar etkinlik testi oluşturamaz
+        'isEventTest': false,
+        'eventId': null,
+      });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(_isAdmin 
-              ? "Test başarıyla yayınlandı! 🚀" 
-              : "Test gönderildi! Admin onayından sonra yayınlanacak."),
+          const SnackBar(
+            content: Text("Mest oluşturuldu! Onay bekleniyor."),
             backgroundColor: Colors.green,
           ),
         );
         Navigator.pop(context);
       }
     } catch (e) {
+      debugPrint("Test oluşturma hatası: $e");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Hata: ${e.toString()}"),
+            content: Text("Bir hata oluştu: $e"),
             backgroundColor: Colors.red,
           ),
         );
       }
     } finally {
       if (mounted) {
-        setState(() => _yukleniyor = false);
+        setState(() => _isLoading = false);
       }
     }
-  }
-
-  Future<void> _tarihSec() async {
-    DateTime? picked = await showDatePicker(
-      context: context,
-      initialDate: DateTime.now().add(const Duration(days: 1)),
-      firstDate: DateTime.now(),
-      lastDate: DateTime(2030),
-      builder: (context, child) {
-        return Theme(
-          data: ThemeData.dark().copyWith(
-            colorScheme: const ColorScheme.dark(
-              primary: Color(0xFFFF5A5F),
-              onPrimary: Colors.white,
-              surface: Color(0xFF1C1C1E),
-            ),
-          ),
-          child: child!,
-        );
-      },
-    );
-    
-    if (picked != null) {
-      TimeOfDay? time = await showTimePicker(
-        context: context,
-        initialTime: TimeOfDay.now(),
-        builder: (context, child) {
-          return Theme(
-            data: ThemeData.dark().copyWith(
-              colorScheme: const ColorScheme.dark(
-                primary: Color(0xFFFF5A5F),
-                onPrimary: Colors.white,
-                surface: Color(0xFF1C1C1E),
-              ),
-            ),
-            child: child!,
-          );
-        },
-      );
-      
-      if (time != null) {
-        setState(() {
-          _eventDate = DateTime(
-            picked.year, picked.month, picked.day, 
-            time.hour, time.minute
-          );
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_checkingAdmin) {
-      return Scaffold(
-        backgroundColor: const Color(0xFF0D0D11),
-        body: const Center(
-          child: CircularProgressIndicator(color: Color(0xFFFF5A5F)),
-        ),
-      );
-    }
-
-    return Scaffold(
-      backgroundColor: const Color(0xFF0D0D11),
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        title: const Text("Yeni Test Oluştur", style: TextStyle(color: Colors.white)),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
-        ),
-      ),
-      body: _yukleniyor
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFFFF5A5F)))
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // 🔒 Normal kullanıcılar için bilgi
-                    if (!_isAdmin)
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        margin: const EdgeInsets.only(bottom: 20),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.blue.withOpacity(0.3)),
-                        ),
-                        child: const Row(
-                          children: [
-                            Icon(Icons.info_outline, color: Colors.blue),
-                            SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                "Testiniz admin onayından sonra yayınlanacaktır.",
-                                style: TextStyle(color: Colors.blue, fontSize: 13),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-
-                    // Test Başlığı
-                    TextFormField(
-                      controller: _baslikController,
-                      style: const TextStyle(color: Colors.white),
-                      maxLength: 100,
-                      decoration: const InputDecoration(
-                        labelText: "Test Başlığı *",
-                        labelStyle: TextStyle(color: Colors.grey),
-                        prefixIcon: Icon(Icons.title, color: Color(0xFFFF5A5F)),
-                        counterStyle: TextStyle(color: Colors.grey),
-                      ),
-                      validator: _validateTitle,
-                    ),
-                    const SizedBox(height: 15),
-
-                    // Kategori
-                    DropdownButtonFormField<String>(
-                      value: _seciliKategori,
-                      dropdownColor: const Color(0xFF1C1C1E),
-                      style: const TextStyle(color: Colors.white),
-                      decoration: const InputDecoration(
-                        labelText: "Kategori",
-                        labelStyle: TextStyle(color: Colors.grey),
-                        prefixIcon: Icon(Icons.category, color: Color(0xFFFF5A5F)),
-                      ),
-                      items: _kategoriler.map((k) => 
-                        DropdownMenuItem(value: k, child: Text(k))
-                      ).toList(),
-                      onChanged: (v) => setState(() => _seciliKategori = v!),
-                    ),
-
-                    const SizedBox(height: 30),
-
-                    // 🔒 SADECE ADMINLERE GÖRÜNEN ETKİNLİK AYARLARI
-                    if (_isAdmin) ...[
-                      Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1C1C1E),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: _isEvent ? Colors.amber : Colors.grey.shade800,
-                          ),
-                        ),
-                        child: Column(
-                          children: [
-                            Row(
-                              children: [
-                                const Icon(Icons.stars, color: Colors.amber),
-                                const SizedBox(width: 10),
-                                const Expanded(
-                                  child: Text(
-                                    "Bu bir Etkinlik Testi mi?",
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                                Switch(
-                                  value: _isEvent,
-                                  activeColor: Colors.amber,
-                                  onChanged: (val) => setState(() => _isEvent = val),
-                                ),
-                              ],
-                            ),
-                            if (_isEvent) ...[
-                              const Divider(color: Colors.grey),
-                              ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                title: Text(
-                                  _eventDate == null
-                                      ? "Başlangıç Tarihi Seç"
-                                      : "${_eventDate!.day}/${_eventDate!.month}/${_eventDate!.year} - ${_eventDate!.hour}:${_eventDate!.minute.toString().padLeft(2, '0')}",
-                                  style: const TextStyle(color: Colors.white),
-                                ),
-                                trailing: const Icon(Icons.calendar_today, color: Colors.amber),
-                                onTap: _tarihSec,
-                              ),
-                            ]
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 30),
-                    ],
-
-                    // Seçenekler Başlık
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          "Seçenekler",
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        Text(
-                          "${_secenekler.length}/16",
-                          style: const TextStyle(color: Colors.grey),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-
-                    // Seçenek Listesi
-                    ListView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _secenekler.length,
-                      itemBuilder: (context, index) {
-                        var item = _secenekler[index];
-                        Uint8List? imgBytes = item['resimBytes'];
-
-                        return Container(
-                          margin: const EdgeInsets.only(bottom: 15),
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1C1C1E),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Row(
-                            children: [
-                              GestureDetector(
-                                onTap: () => _resimSec(index),
-                                child: Container(
-                                  width: 80,
-                                  height: 80,
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey[900],
-                                    borderRadius: BorderRadius.circular(10),
-                                    image: imgBytes != null
-                                        ? DecorationImage(
-                                            image: MemoryImage(imgBytes),
-                                            fit: BoxFit.cover,
-                                          )
-                                        : null,
-                                  ),
-                                  child: imgBytes == null
-                                      ? const Icon(Icons.add_a_photo, color: Colors.grey)
-                                      : null,
-                                ),
-                              ),
-                              const SizedBox(width: 15),
-                              Expanded(
-                                child: TextFormField(
-                                  controller: item['isim'],
-                                  style: const TextStyle(color: Colors.white),
-                                  maxLength: 50,
-                                  decoration: InputDecoration(
-                                    labelText: "${index + 1}. Seçenek Adı",
-                                    border: InputBorder.none,
-                                    counterText: "",
-                                  ),
-                                ),
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.delete, color: Colors.redAccent),
-                                onPressed: () {
-                                  (item['isim'] as TextEditingController).dispose();
-                                  setState(() => _secenekler.removeAt(index));
-                                },
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-
-                    // Seçenek Ekle Butonu
-                    Center(
-                      child: TextButton.icon(
-                        onPressed: _secenekEkle,
-                        icon: const Icon(Icons.add, color: Color(0xFFFF5A5F)),
-                        label: const Text(
-                          "Seçenek Ekle",
-                          style: TextStyle(color: Color(0xFFFF5A5F)),
-                        ),
-                      ),
-                    ),
-
-                    const SizedBox(height: 40),
-
-                    // Yayınla Butonu
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: _testiYayinla,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFFF5A5F),
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: Text(
-                          _isAdmin ? "TESTİ YAYINLA" : "ONAYA GÖNDER",
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 40),
-                  ],
-                ),
-              ),
-            ),
-    );
   }
 }

@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'models.dart';
-import 'sonuc_screen.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'dart:math';
+import 'dart:async';
 
 class PlayMestScreen extends StatefulWidget {
   final String testId;
@@ -12,326 +13,495 @@ class PlayMestScreen extends StatefulWidget {
   State<PlayMestScreen> createState() => _PlayMestScreenState();
 }
 
-class _PlayMestScreenState extends State<PlayMestScreen> {
-  final Color mainColor = const Color(0xFFFF5A5F);
-  List<Secenek> aktifListe = [];
-  bool yukleniyor = true;
-  String testBasligi = "";
-  List<Secenek> gelecekTurListesi = [];
-  List<String> secimGecmisiIDleri = [];
-  int suankiIndex = 0;
+class _PlayMestScreenState extends State<PlayMestScreen> with SingleTickerProviderStateMixin {
+  List<Map<String, dynamic>> secenekler = [];
+  List<Map<String, dynamic>> currentRound = [];
+  int currentMatchIndex = 0;
+  int roundNumber = 1;
+  String testBaslik = "";
+  String? testKapakResmi;
+  bool isLoading = true;
+  Map<String, dynamic>? winner;
   
-  // 🔴 HATA DÜZELTİLDİ: Tur bilgisi eklendi
-  int mevcutTur = 1;
-  int toplamTur = 0;
+  // Etkinlik testi kontrolleri
+  bool isEventTest = false;
+  DateTime? eventEndTime;
+  Timer? _countdownTimer;
+  Duration? remainingTime;
+  
+  // Her tur sonuçları
+  List<Map<String, dynamic>> roundWinners = [];
+  Map<String, int> scores = {};
+
+  // Animasyon
+  late AnimationController _animController;
+  late Animation<double> _scaleAnimation;
+  int? selectedIndex;
 
   @override
   void initState() {
     super.initState();
-    _verileriGetir();
+    _animController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.95).animate(
+      CurvedAnimation(parent: _animController, curve: Curves.easeInOut),
+    );
+    _loadTest();
   }
 
-  Future<void> _verileriGetir() async {
+  @override
+  void dispose() {
+    _animController.dispose();
+    _countdownTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadTest() async {
     try {
-      var doc = await FirebaseFirestore.instance
+      DocumentSnapshot doc = await FirebaseFirestore.instance
           .collection('testler')
           .doc(widget.testId)
           .get();
+
+      if (!doc.exists) {
+        if (mounted) {
+          _showError("Test bulunamadı");
+          Navigator.pop(context);
+        }
+        return;
+      }
+
+      var data = doc.data() as Map<String, dynamic>;
+      
+      // ============ ETKİNLİK TESTİ KONTROLÜ ============
+      isEventTest = data['isEventTest'] ?? false;
+      
+      if (isEventTest) {
+        Timestamp? endTimeStamp = data['eventEndTime'];
+        if (endTimeStamp != null) {
+          eventEndTime = endTimeStamp.toDate();
           
-      if (doc.exists) {
-        var veri = doc.data()!;
-        List<dynamic> hamListe = veri['secenekler'] ?? [];
-        List<Secenek> yeniListe = hamListe.map((e) => Secenek.fromMap(e)).toList();
-        yeniListe.shuffle();
-
-        // 🔴 HATA DÜZELTİLDİ: Seçenek sayısı kontrolü
-        if (yeniListe.length < 2) {
-          if (mounted) {
-            setState(() {
-              testBasligi = "Yetersiz Seçenek";
-              yukleniyor = false;
-            });
+          // Süre kontrolü
+          if (DateTime.now().isAfter(eventEndTime!)) {
+            if (mounted) {
+              _showError("Bu etkinliğin süresi dolmuş");
+              Navigator.pop(context);
+            }
+            return;
           }
-          return;
+          
+          // Geri sayım başlat
+          _startCountdown();
         }
-
-        // 🔴 YENİ: Seçenek sayısını 2'nin kuvvetine yuvarla (turnuva formatı için)
-        int count = yeniListe.length;
-        int validCount = 2;
-        while (validCount * 2 <= count) {
-          validCount *= 2;
-        }
-        yeniListe = yeniListe.take(validCount).toList();
-
-        // Toplam tur hesapla
-        int turSayisi = 0;
-        int temp = validCount;
-        while (temp > 1) {
-          temp ~/= 2;
-          turSayisi++;
-        }
-
-        if (mounted) {
-          setState(() {
-            testBasligi = veri['baslik'] ?? "Turnuva";
-            aktifListe = yeniListe;
-            yukleniyor = false;
-            gelecekTurListesi.clear();
-            secimGecmisiIDleri.clear();
-            suankiIndex = 0;
-            mevcutTur = 1;
-            toplamTur = turSayisi;
-          });
-        }
-
-        // 🔴 YENİ: PlayCount artır
-        await FirebaseFirestore.instance
-            .collection('testler')
-            .doc(widget.testId)
-            .update({'playCount': FieldValue.increment(1)});
-            
-      } else {
-        if (mounted) {
-          setState(() {
-            testBasligi = "Test Bulunamadı";
-            yukleniyor = false;
-          });
+        
+        // Başlangıç zamanı kontrolü
+        Timestamp? startTimeStamp = data['eventStartTime'];
+        if (startTimeStamp != null) {
+          DateTime startTime = startTimeStamp.toDate();
+          if (DateTime.now().isBefore(startTime)) {
+            if (mounted) {
+              _showError("Bu etkinlik henüz başlamadı");
+              Navigator.pop(context);
+            }
+            return;
+          }
         }
       }
+
+      List<dynamic> rawSecenekler = data['secenekler'] ?? [];
+
+      setState(() {
+        testBaslik = data['baslik'] ?? 'Test';
+        testKapakResmi = data['kapakResmi'];
+        secenekler = rawSecenekler.map((s) {
+          String isim = s['isim'] ?? s['name'] ?? 'Seçenek';
+          String? resim = s['resimUrl'] ?? s['resim'] ?? s['image'];
+          return {'isim': isim, 'resim': resim, 'id': isim};
+        }).toList();
+
+        // Karıştır
+        secenekler.shuffle(Random());
+
+        // İlk turu hazırla
+        _prepareRound();
+        isLoading = false;
+      });
     } catch (e) {
       debugPrint("Test yükleme hatası: $e");
       if (mounted) {
-        setState(() => yukleniyor = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Hata: $e"), backgroundColor: Colors.red),
-        );
+        _showError("Test yüklenirken hata oluştu");
+        Navigator.pop(context);
       }
     }
   }
 
-  void secimYap(Secenek kazanan) {
-    setState(() {
-      gelecekTurListesi.add(kazanan);
-      secimGecmisiIDleri.add(kazanan.id);
-      suankiIndex += 2;
-
-      // 🔴 HATA DÜZELTİLDİ: Index kontrolü
-      if (suankiIndex >= aktifListe.length) {
-        if (gelecekTurListesi.length == 1) {
-          // Şampiyon belirlendi!
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (context) => SonucScreen(
-                sampiyon: gelecekTurListesi[0],
-                secimGecmisi: secimGecmisiIDleri,
-                testId: widget.testId, // 🔴 YENİ: testId eklendi
-              ),
-            ),
-          );
-        } else {
-          // Yeni tura geç
-          aktifListe = List.from(gelecekTurListesi);
-          gelecekTurListesi.clear();
-          suankiIndex = 0;
-          mevcutTur++;
-        }
+  void _startCountdown() {
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (eventEndTime == null) {
+        timer.cancel();
+        return;
+      }
+      
+      setState(() {
+        remainingTime = eventEndTime!.difference(DateTime.now());
+      });
+      
+      // Süre bittiyse
+      if (remainingTime!.isNegative) {
+        timer.cancel();
+        _showTimeUpDialog();
+      }
+      
+      // Son 5 dakika uyarısı
+      if (remainingTime!.inMinutes == 5 && remainingTime!.inSeconds % 60 == 0) {
+        _showWarning("⏰ Son 5 dakika!");
       }
     });
   }
 
-  // Tur ismi belirleme
-  String _getTurIsmi() {
-    int kalanKisi = aktifListe.length;
-    if (kalanKisi == 2) return "🏆 FİNAL";
-    if (kalanKisi == 4) return "Yarı Final";
-    if (kalanKisi == 8) return "Çeyrek Final";
-    if (kalanKisi == 16) return "Son 16";
-    return "Tur $mevcutTur";
+  void _showTimeUpDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.timer_off, color: Colors.red, size: 28),
+            SizedBox(width: 10),
+            Text("Süre Doldu!", style: TextStyle(color: Colors.white)),
+          ],
+        ),
+        content: const Text(
+          "Etkinlik süresi sona erdi. Sonuçların kaydedildi.",
+          style: TextStyle(color: Colors.grey),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context); // Dialog'u kapat
+              Navigator.pop(context); // Sayfadan çık
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF5A5F)),
+            child: const Text("Tamam", style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showError(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  void _showWarning(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: Colors.orange,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  void _prepareRound() {
+    if (secenekler.length == 1) {
+      setState(() {
+        winner = secenekler[0];
+      });
+      _saveResult();
+      return;
+    }
+
+    currentRound = List.from(secenekler);
+    if (currentRound.length % 2 != 0) {
+      roundWinners.add(currentRound.removeLast());
+    }
+
+    currentMatchIndex = 0;
+    roundWinners = [];
+  }
+
+  void _selectOption(int index) async {
+    if (selectedIndex != null) return;
+
+    // Süre kontrolü (etkinlik testi ise)
+    if (isEventTest && eventEndTime != null) {
+      if (DateTime.now().isAfter(eventEndTime!)) {
+        _showTimeUpDialog();
+        return;
+      }
+    }
+
+    setState(() => selectedIndex = index);
+    await _animController.forward();
+
+    Map<String, dynamic> selected = index == 0 
+        ? currentRound[currentMatchIndex * 2]
+        : currentRound[currentMatchIndex * 2 + 1];
+    
+    String selectedId = selected['id'];
+    scores[selectedId] = (scores[selectedId] ?? 0) + 1;
+    
+    roundWinners.add(selected);
+
+    await Future.delayed(const Duration(milliseconds: 400));
+    _animController.reset();
+
+    setState(() {
+      selectedIndex = null;
+      currentMatchIndex++;
+
+      if (currentMatchIndex * 2 >= currentRound.length) {
+        secenekler = List.from(roundWinners);
+        roundNumber++;
+        _prepareRound();
+      }
+    });
+  }
+
+  Future<void> _saveResult() async {
+    if (winner == null) return;
+
+    try {
+      String? userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) return;
+
+      await FirebaseFirestore.instance.collection('turnuvalar').add({
+        'odenen': userId,
+        'testId': widget.testId,
+        'kazanan': winner!['isim'],
+        'kazananResim': winner!['resim'],
+        'skorlar': scores,
+        'tarih': FieldValue.serverTimestamp(),
+        'isEventTest': isEventTest,
+      });
+
+      await FirebaseFirestore.instance.collection('users').doc(userId).update({
+        'testCount': FieldValue.increment(1),
+      });
+
+      // Test play count güncelle
+      await FirebaseFirestore.instance.collection('testler').doc(widget.testId).update({
+        'playCount': FieldValue.increment(1),
+      });
+    } catch (e) {
+      debugPrint("Sonuç kaydetme hatası: $e");
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (yukleniyor) {
+    if (isLoading) {
       return Scaffold(
         backgroundColor: const Color(0xFF0D0D11),
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircularProgressIndicator(color: mainColor),
-              const SizedBox(height: 20),
-              const Text("Test yükleniyor...", style: TextStyle(color: Colors.white70)),
-            ],
-          ),
+        body: const Center(
+          child: CircularProgressIndicator(color: Color(0xFFFF5A5F)),
         ),
       );
     }
 
-    if (aktifListe.length < 2) {
-      return Scaffold(
-        backgroundColor: const Color(0xFF0D0D11),
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
-            onPressed: () => Navigator.pop(context),
-          ),
-        ),
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.warning_amber_rounded, size: 80, color: mainColor),
-              const SizedBox(height: 20),
-              const Text(
-                "Bu testte yeterli seçenek yok.",
-                style: TextStyle(color: Colors.white, fontSize: 18),
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                "En az 2 seçenek gerekli.",
-                style: TextStyle(color: Colors.grey),
-              ),
-              const SizedBox(height: 30),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context),
-                style: ElevatedButton.styleFrom(backgroundColor: mainColor),
-                child: const Text("Geri Dön", style: TextStyle(color: Colors.white)),
-              ),
-            ],
-          ),
-        ),
+    if (winner != null) {
+      return _buildWinnerScreen();
+    }
+
+    if (currentMatchIndex * 2 + 1 >= currentRound.length) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF0D0D11),
+        body: Center(child: CircularProgressIndicator(color: Color(0xFFFF5A5F))),
       );
     }
 
-    // 🔴 HATA DÜZELTİLDİ: Index sınır kontrolü
-    if (suankiIndex + 1 >= aktifListe.length) {
-      return Scaffold(
-        backgroundColor: const Color(0xFF0D0D11),
-        body: Center(
-          child: CircularProgressIndicator(color: mainColor),
-        ),
-      );
-    }
-
-    Secenek aday1 = aktifListe[suankiIndex];
-    Secenek aday2 = aktifListe[suankiIndex + 1];
-
-    // Maç numarası hesaplama
-    int macNo = (suankiIndex ~/ 2) + 1;
-    int toplamMac = aktifListe.length ~/ 2;
+    Map<String, dynamic> option1 = currentRound[currentMatchIndex * 2];
+    Map<String, dynamic> option2 = currentRound[currentMatchIndex * 2 + 1];
 
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D11),
-      body: SafeArea(
-        child: Column(
-          children: [
-            // Üst Bar
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0D0D11),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.white, size: 20),
+          onPressed: () => _showExitDialog(),
+        ),
+        title: const Text("Mestler", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        actions: [
+          // Etkinlik testi ise kalan süreyi göster
+          if (isEventTest && remainingTime != null)
+            Container(
+              margin: const EdgeInsets.only(right: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: remainingTime!.inMinutes < 5 ? Colors.red : Colors.green,
+                borderRadius: BorderRadius.circular(20),
+              ),
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
-                    onPressed: () => _showExitDialog(),
-                  ),
-                  Expanded(
-                    child: Column(
-                      children: [
-                        Text(
-                          testBasligi,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                          textAlign: TextAlign.center,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          "${_getTurIsmi()} • Maç $macNo/$toplamMac",
-                          style: TextStyle(color: mainColor, fontSize: 12),
-                        ),
-                      ],
+                  const Icon(Icons.timer, color: Colors.white, size: 16),
+                  const SizedBox(width: 4),
+                  Text(
+                    _formatDuration(remainingTime!),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
                     ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.refresh, color: Colors.white),
-                    onPressed: () {
-                      setState(() => yukleniyor = true);
-                      _verileriGetir();
-                    },
                   ),
                 ],
               ),
             ),
+        ],
+      ),
+      body: Column(
+        children: [
+          const SizedBox(height: 10),
 
-            // İlerleme çubuğu
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: LinearProgressIndicator(
-                  value: (mevcutTur - 1 + (macNo / toplamMac)) / toplamTur,
-                  backgroundColor: Colors.grey[800],
-                  valueColor: AlwaysStoppedAnimation<Color>(mainColor),
-                  minHeight: 6,
-                ),
+          // Test başlığı
+          _buildTestHeader(),
+
+          const SizedBox(height: 20),
+
+          // Soru
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(horizontal: 20),
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(30),
+            ),
+            child: const Text(
+              "Hangisi Daha Güzel?",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.black,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
               ),
             ),
+          ),
 
-            const SizedBox(height: 10),
+          const SizedBox(height: 25),
 
-            // "Hangisini tercih edersin?" yazısı
-            const Text(
-              "Hangisini tercih edersin?",
-              style: TextStyle(color: Colors.white70, fontSize: 16),
+          // Seçenekler
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  Expanded(child: _buildOptionCard(option1, 0)),
+                  const SizedBox(width: 15),
+                  Expanded(child: _buildOptionCard(option2, 1)),
+                ],
+              ),
             ),
+          ),
 
-            const SizedBox(height: 10),
+          const SizedBox(height: 20),
 
-            // Kartlar
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => secimYap(aday1),
-                        child: _buildCard(aday1),
-                      ),
+          // Butonlar
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(context),
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: Colors.grey[700]!),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
                     ),
-                    // VS yazısı
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: mainColor.withOpacity(0.2),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Text(
-                          "VS",
-                          style: TextStyle(
-                            color: mainColor,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => secimYap(aday2),
-                        child: _buildCard(aday2),
-                      ),
-                    ),
-                  ],
+                    child: const Text("Kaydet", style: TextStyle(color: Colors.grey, fontSize: 15)),
+                  ),
                 ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: currentMatchIndex > 0 ? _goBack : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFF5A5F),
+                      disabledBackgroundColor: const Color(0xFFFF5A5F).withOpacity(0.3),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    ),
+                    child: const Text("Önceki Soru", style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 30),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTestHeader() {
+    String? imageUrl = testKapakResmi;
+    if (imageUrl == null || imageUrl.isEmpty) {
+      if (secenekler.isNotEmpty) {
+        imageUrl = secenekler[0]['resim'];
+      }
+    }
+
+    return Container(
+      height: 80,
+      margin: const EdgeInsets.symmetric(horizontal: 20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        color: const Color(0xFF1C1C1E),
+        border: Border.all(color: const Color(0xFFFF5A5F).withOpacity(0.5)),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (imageUrl != null)
+              Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (c, e, s) => Container(color: const Color(0xFF1C1C1E)),
+              ),
+            Container(color: Colors.black.withOpacity(0.5)),
+            Center(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    testBaslik,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  if (isEventTest)
+                    Container(
+                      margin: const EdgeInsets.only(left: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.amber,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Text(
+                        "ETKİNLİK",
+                        style: TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                ],
               ),
             ),
           ],
@@ -340,14 +510,215 @@ class _PlayMestScreenState extends State<PlayMestScreen> {
     );
   }
 
-  // Çıkış diyaloğu
+  Widget _buildOptionCard(Map<String, dynamic> option, int index) {
+    bool isSelected = selectedIndex == index;
+    String? imageUrl = option['resim'];
+
+    return GestureDetector(
+      onTap: () => _selectOption(index),
+      child: AnimatedBuilder(
+        animation: _scaleAnimation,
+        builder: (context, child) {
+          double scale = isSelected ? _scaleAnimation.value : 1.0;
+          return Transform.scale(
+            scale: scale,
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: isSelected ? const Color(0xFFFF5A5F) : Colors.transparent,
+                  width: 3,
+                ),
+                boxShadow: isSelected
+                    ? [BoxShadow(color: const Color(0xFFFF5A5F).withOpacity(0.4), blurRadius: 15, spreadRadius: 2)]
+                    : [],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    imageUrl != null
+                        ? Image.network(
+                            imageUrl,
+                            fit: BoxFit.cover,
+                            errorBuilder: (c, e, s) => _buildPlaceholder(option['isim']),
+                          )
+                        : _buildPlaceholder(option['isim']),
+                    Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [Colors.transparent, Colors.black.withOpacity(0.8)],
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      bottom: 16,
+                      left: 12,
+                      right: 12,
+                      child: Text(
+                        option['isim'] ?? '',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          shadows: [Shadow(color: Colors.black, blurRadius: 10)],
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildPlaceholder(String name) {
+    return Container(
+      color: const Color(0xFF1C1C1E),
+      child: Center(
+        child: Text(name, style: const TextStyle(color: Colors.white, fontSize: 16), textAlign: TextAlign.center),
+      ),
+    );
+  }
+
+  Widget _buildWinnerScreen() {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D11),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0D0D11),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.white, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: const Text("Mestler", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        centerTitle: true,
+      ),
+      body: Column(
+        children: [
+          const SizedBox(height: 20),
+          _buildTestHeader(),
+          const SizedBox(height: 25),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 12),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(30)),
+            child: const Text("Kazanan", style: TextStyle(color: Colors.black, fontSize: 18, fontWeight: FontWeight.bold)),
+          ),
+          const SizedBox(height: 20),
+          const Icon(Icons.check, color: Color(0xFFFF5A5F), size: 80),
+          const SizedBox(height: 20),
+          Container(
+            width: 250,
+            height: 250,
+            margin: const EdgeInsets.symmetric(horizontal: 20),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              color: const Color(0xFF1C1C1E),
+              boxShadow: [BoxShadow(color: const Color(0xFFFF5A5F).withOpacity(0.3), blurRadius: 20, spreadRadius: 5)],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (winner!['resim'] != null)
+                    Image.network(winner!['resim'], fit: BoxFit.cover),
+                  Container(color: Colors.black.withOpacity(0.3)),
+                  Center(
+                    child: Text(
+                      winner!['isim'] ?? 'Kazanan',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 28,
+                        fontWeight: FontWeight.bold,
+                        shadows: [Shadow(color: Colors.black, blurRadius: 10)],
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const Spacer(),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(context),
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: Colors.grey[700]!),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    ),
+                    child: const Text("Geri Dön", style: TextStyle(color: Colors.grey)),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => _showStatistics(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFF5A5F),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    ),
+                    child: const Text("İstatistikler", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 30),
+        ],
+      ),
+    );
+  }
+
+  void _showStatistics() {
+    // İstatistik sayfasına git
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MestStatisticsScreen(
+          testId: widget.testId,
+          testBaslik: testBaslik,
+          testKapakResmi: testKapakResmi,
+        ),
+      ),
+    );
+  }
+
+  void _goBack() {
+    if (currentMatchIndex > 0) {
+      setState(() {
+        currentMatchIndex--;
+        if (roundWinners.isNotEmpty) {
+          roundWinners.removeLast();
+        }
+      });
+    }
+  }
+
   void _showExitDialog() {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1C1C1E),
-        title: const Text("Çıkmak istediğine emin misin?", style: TextStyle(color: Colors.white)),
-        content: const Text("İlerlemeniz kaydedilmeyecek.", style: TextStyle(color: Colors.grey)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text("Testten Çık", style: TextStyle(color: Colors.white)),
+        content: const Text(
+          "İlerlemeniz kaydedilmeyecek. Çıkmak istediğinize emin misiniz?",
+          style: TextStyle(color: Colors.grey),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -355,10 +726,10 @@ class _PlayMestScreenState extends State<PlayMestScreen> {
           ),
           ElevatedButton(
             onPressed: () {
-              Navigator.pop(context); // Dialog'u kapat
-              Navigator.pop(context); // Ekrandan çık
+              Navigator.pop(context);
+              Navigator.pop(context);
             },
-            style: ElevatedButton.styleFrom(backgroundColor: mainColor),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF5A5F)),
             child: const Text("Çık", style: TextStyle(color: Colors.white)),
           ),
         ],
@@ -366,101 +737,170 @@ class _PlayMestScreenState extends State<PlayMestScreen> {
     );
   }
 
-  Widget _buildCard(Secenek item) {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.3),
-            blurRadius: 10,
-            offset: const Offset(0, 5),
-          ),
-        ],
+  String _formatDuration(Duration duration) {
+    if (duration.isNegative) return "00:00";
+    
+    int hours = duration.inHours;
+    int minutes = duration.inMinutes % 60;
+    int seconds = duration.inSeconds % 60;
+
+    if (hours > 0) {
+      return "${hours}s ${minutes}dk";
+    } else if (minutes > 0) {
+      return "${minutes}:${seconds.toString().padLeft(2, '0')}";
+    } else {
+      return "0:${seconds.toString().padLeft(2, '0')}";
+    }
+  }
+}
+
+// ============ İSTATİSTİKLER SAYFASI ============
+class MestStatisticsScreen extends StatelessWidget {
+  final String testId;
+  final String testBaslik;
+  final String? testKapakResmi;
+
+  const MestStatisticsScreen({
+    super.key,
+    required this.testId,
+    required this.testBaslik,
+    this.testKapakResmi,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D11),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0D0D11),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.white, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: const Text("İstatistikler", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        centerTitle: true,
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            // Resim
-            Image.network(
-              item.resimUrl,
-              fit: BoxFit.cover,
-              loadingBuilder: (context, child, loadingProgress) {
-                if (loadingProgress == null) return child;
-                return Container(
-                  color: const Color(0xFF1C1C1E),
-                  child: Center(
-                    child: CircularProgressIndicator(
-                      color: mainColor,
-                      value: loadingProgress.expectedTotalBytes != null
-                          ? loadingProgress.cumulativeBytesLoaded /
-                              loadingProgress.expectedTotalBytes!
-                          : null,
-                    ),
-                  ),
+      body: Column(
+        children: [
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 12),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(30)),
+            child: const Text("En çok kazananlar", style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)),
+          ),
+          const SizedBox(height: 20),
+          Expanded(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('turnuvalar')
+                  .where('testId', isEqualTo: testId)
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator(color: Color(0xFFFF5A5F)));
+                }
+
+                Map<String, Map<String, dynamic>> winnerStats = {};
+                
+                for (var doc in snapshot.data!.docs) {
+                  var data = doc.data() as Map<String, dynamic>;
+                  String kazanan = data['kazanan'] ?? '';
+                  String? resim = data['kazananResim'];
+                  
+                  if (kazanan.isNotEmpty) {
+                    if (winnerStats.containsKey(kazanan)) {
+                      winnerStats[kazanan]!['count']++;
+                    } else {
+                      winnerStats[kazanan] = {'name': kazanan, 'resim': resim, 'count': 1};
+                    }
+                  }
+                }
+
+                List<Map<String, dynamic>> sortedWinners = winnerStats.values.toList();
+                sortedWinners.sort((a, b) => (b['count'] as int).compareTo(a['count'] as int));
+
+                int totalVotes = sortedWinners.fold(0, (sum, item) => sum + (item['count'] as int));
+
+                if (sortedWinners.isEmpty) {
+                  return const Center(
+                    child: Text("Henüz sonuç yok", style: TextStyle(color: Colors.grey)),
+                  );
+                }
+
+                return ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  itemCount: sortedWinners.length > 10 ? 10 : sortedWinners.length,
+                  itemBuilder: (context, index) {
+                    var winner = sortedWinners[index];
+                    double percentage = totalVotes > 0 ? (winner['count'] / totalVotes) * 100 : 0;
+
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1C1C1E),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Text(
+                            "#${index + 1}",
+                            style: TextStyle(
+                              color: index == 0 ? Colors.amber : (index == 1 ? Colors.grey : (index == 2 ? Colors.orange : Colors.white)),
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  winner['name'],
+                                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                                ),
+                                Text(
+                                  "%${percentage.toStringAsFixed(1)} oy",
+                                  style: TextStyle(color: Colors.grey[500], fontSize: 12),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (winner['resim'] != null)
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.network(
+                                winner['resim'],
+                                width: 50,
+                                height: 50,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
                 );
               },
-              errorBuilder: (c, e, s) => Container(
-                color: const Color(0xFF1C1C1E),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(Icons.broken_image, color: Colors.grey, size: 40),
-                    const SizedBox(height: 10),
-                    Text(
-                      item.isim,
-                      style: const TextStyle(color: Colors.white),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                ),
-              ),
             ),
-            // Gradient overlay
-            Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.transparent,
-                    Colors.transparent,
-                    Colors.black.withOpacity(0.8),
-                  ],
-                  stops: const [0.0, 0.5, 1.0],
-                ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.pop(context);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFF5A5F),
+                minimumSize: const Size(double.infinity, 50),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
               ),
+              child: const Text("Başka Bir Mest Çöz", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
             ),
-            // İsim
-            Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  item.isim,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    shadows: [
-                      Shadow(
-                        blurRadius: 10,
-                        color: Colors.black,
-                      ),
-                    ],
-                  ),
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

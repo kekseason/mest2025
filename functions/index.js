@@ -1,347 +1,302 @@
-// Firebase Cloud Functions - index.js
-// Bu dosyayı Firebase Functions projenize ekleyin
-// Komut: firebase init functions && firebase deploy --only functions
+// Firebase Cloud Functions v2 - Etkinlik ve Resim Proxy Sistemi
 
-const functions = require('firebase-functions');
-const admin = require('firebase-admin');
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const { setGlobalOptions } = require("firebase-functions/v2");
+const { onRequest } = require("firebase-functions/v2/https");
+const admin = require("firebase-admin");
+const axios = require("axios");
 
-admin.initializeApp();
+if (!admin.apps.length) {
+  admin.initializeApp();
+}
 
 const db = admin.firestore();
-const messaging = admin.messaging();
 
-// ============ YENİ MESAJ BİLDİRİMİ ============
-exports.onNewMessage = functions.firestore
-    .document('chats/{chatId}/messages/{messageId}')
-    .onCreate(async (snap, context) => {
-        const message = snap.data();
-        const chatId = context.params.chatId;
-
-        // Chat bilgilerini al
-        const chatDoc = await db.collection('chats').doc(chatId).get();
-        const chatData = chatDoc.data();
-
-        if (!chatData) return null;
-
-        // Alıcıyı bul
-        const senderId = message.senderId;
-        const users = chatData.users || [];
-        const receiverId = users.find(id => id !== senderId);
-
-        if (!receiverId) return null;
-
-        // Alıcının bilgilerini al
-        const receiverDoc = await db.collection('users').doc(receiverId).get();
-        const receiverData = receiverDoc.data();
-
-        if (!receiverData) return null;
-
-        // Bildirim ayarlarını kontrol et
-        const settings = receiverData.settings || {};
-        if (settings.yeniMesajBildirim === false) return null;
-
-        // FCM token kontrolü
-        const fcmToken = receiverData.fcmToken;
-        if (!fcmToken) return null;
-
-        // Gönderen ismini al
-        const senderDoc = await db.collection('users').doc(senderId).get();
-        const senderName = senderDoc.data()?.name || 'Birisi';
-
-        // Mesaj metnini kısalt
-        let messageText = message.text || '';
-        if (message.type === 'invite') {
-            messageText = '🎮 Sana bir test daveti gönderdi!';
-        } else if (messageText.length > 50) {
-            messageText = messageText.substring(0, 50) + '...';
-        }
-
-        // Bildirim gönder
-        try {
-            await messaging.send({
-                token: fcmToken,
-                notification: {
-                    title: `💬 ${senderName}`,
-                    body: messageText,
-                },
-                data: {
-                    type: 'message',
-                    chatId: chatId,
-                    senderId: senderId,
-                },
-                android: {
-                    priority: 'high',
-                    notification: {
-                        channelId: 'mest_notifications',
-                        color: '#FF5A5F',
-                        sound: 'default',
-                    },
-                },
-                apns: {
-                    payload: {
-                        aps: {
-                            sound: 'default',
-                            badge: 1,
-                        },
-                    },
-                },
-            });
-
-            console.log('Mesaj bildirimi gönderildi:', receiverId);
-        } catch (error) {
-            console.error('Bildirim gönderme hatası:', error);
-            
-            // Token geçersizse sil
-            if (error.code === 'messaging/invalid-registration-token' ||
-                error.code === 'messaging/registration-token-not-registered') {
-                await db.collection('users').doc(receiverId).update({
-                    fcmToken: admin.firestore.FieldValue.delete()
-                });
-            }
-        }
-
-        return null;
-    });
-
-// ============ YENİ EŞLEŞME BİLDİRİMİ ============
-exports.onNewMatch = functions.firestore
-    .document('bildirimler/{bildirimId}')
-    .onCreate(async (snap, context) => {
-        const notification = snap.data();
-        const receiverId = notification.aliciId;
-
-        if (!receiverId) return null;
-
-        // Alıcının bilgilerini al
-        const receiverDoc = await db.collection('users').doc(receiverId).get();
-        const receiverData = receiverDoc.data();
-
-        if (!receiverData) return null;
-
-        // Bildirim ayarlarını kontrol et
-        const settings = receiverData.settings || {};
-        if (settings.eslesmeBildirim === false) return null;
-
-        // FCM token kontrolü
-        const fcmToken = receiverData.fcmToken;
-        if (!fcmToken) return null;
-
-        const senderName = notification.gonderenIsim || 'Birisi';
-        const uyum = notification.uyum || 0;
-
-        try {
-            await messaging.send({
-                token: fcmToken,
-                notification: {
-                    title: '💖 Yeni Eşleşme!',
-                    body: `${senderName} seninle %${uyum} uyumlu!`,
-                },
-                data: {
-                    type: 'match',
-                    senderId: notification.gonderenId || '',
-                },
-                android: {
-                    priority: 'high',
-                    notification: {
-                        channelId: 'mest_notifications',
-                        color: '#FF5A5F',
-                        sound: 'default',
-                    },
-                },
-                apns: {
-                    payload: {
-                        aps: {
-                            sound: 'default',
-                            badge: 1,
-                        },
-                    },
-                },
-            });
-
-            console.log('Eşleşme bildirimi gönderildi:', receiverId);
-        } catch (error) {
-            console.error('Bildirim gönderme hatası:', error);
-        }
-
-        return null;
-    });
-
-// ============ YENİ ROZET BİLDİRİMİ ============
-exports.onNewBadge = functions.firestore
-    .document('users/{userId}')
-    .onUpdate(async (change, context) => {
-        const before = change.before.data();
-        const after = change.after.data();
-        const userId = context.params.userId;
-
-        const oldBadges = before.badges || [];
-        const newBadges = after.badges || [];
-
-        // Yeni rozet eklendiyse
-        if (newBadges.length > oldBadges.length) {
-            const addedBadge = newBadges.find(b => !oldBadges.includes(b));
-            
-            if (addedBadge) {
-                const fcmToken = after.fcmToken;
-                if (!fcmToken) return null;
-
-                try {
-                    await messaging.send({
-                        token: fcmToken,
-                        notification: {
-                            title: '🏆 Yeni Rozet!',
-                            body: `"${addedBadge}" rozetini kazandın!`,
-                        },
-                        data: {
-                            type: 'badge',
-                            badgeName: addedBadge,
-                        },
-                        android: {
-                            priority: 'high',
-                            notification: {
-                                channelId: 'mest_notifications',
-                                color: '#FF5A5F',
-                            },
-                        },
-                    });
-
-                    console.log('Rozet bildirimi gönderildi:', userId);
-                } catch (error) {
-                    console.error('Bildirim gönderme hatası:', error);
-                }
-            }
-        }
-
-        return null;
-    });
-
-// ============ HESAP SİLME - VERİ TEMİZLİĞİ ============
-exports.onUserDeleted = functions.auth.user().onDelete(async (user) => {
-    const userId = user.uid;
-    const batch = db.batch();
-
-    try {
-        // Kullanıcı dökümanını sil
-        batch.delete(db.collection('users').doc(userId));
-
-        // Bildirimleri sil
-        const notifications = await db.collection('bildirimler')
-            .where('aliciId', '==', userId)
-            .get();
-        notifications.forEach(doc => batch.delete(doc.ref));
-
-        // Gönderilen bildirimleri sil
-        const sentNotifications = await db.collection('bildirimler')
-            .where('gonderenId', '==', userId)
-            .get();
-        sentNotifications.forEach(doc => batch.delete(doc.ref));
-
-        // Turnuva sonuçlarını sil
-        const tournaments = await db.collection('turnuvalar')
-            .where('odenen', '==', userId)
-            .get();
-        tournaments.forEach(doc => batch.delete(doc.ref));
-
-        // Feedback'leri sil
-        const feedback = await db.collection('feedback')
-            .where('userId', '==', userId)
-            .get();
-        feedback.forEach(doc => batch.delete(doc.ref));
-
-        await batch.commit();
-        console.log('Kullanıcı verileri silindi:', userId);
-    } catch (error) {
-        console.error('Veri silme hatası:', error);
-    }
-
-    return null;
+setGlobalOptions({ 
+  region: "europe-west1",
+  maxInstances: 10 
 });
 
-// ============ GÜNLÜK ÖZET BİLDİRİMİ ============
-exports.dailySummary = functions.pubsub
-    .schedule('0 20 * * *') // Her gün saat 20:00
-    .timeZone('Europe/Istanbul')
-    .onRun(async (context) => {
-        // Son 24 saatte giriş yapmayan kullanıcıları bul
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        
-        const inactiveUsers = await db.collection('users')
-            .where('lastActive', '<', oneDayAgo)
-            .where('fcmToken', '!=', null)
-            .limit(100) // Batch limit
-            .get();
+// ============ RESİM PROXY FONKSİYONU (CORS DÜZELTME) ============
+exports.imageProxy = onRequest(
+  {
+    region: "europe-west1",
+    maxInstances: 10,
+    cors: true, // <-- BU ÖNEMLİ! Otomatik CORS desteği
+  },
+  async (req, res) => {
+    // CORS headers - HER ZAMAN gönder (başarılı veya hatalı)
+    res.set("Access-Control-Allow-Origin", "*");
+    res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "Content-Type");
 
-        const promises = inactiveUsers.docs.map(async (doc) => {
-            const userData = doc.data();
-            const settings = userData.settings || {};
-            
-            // Pazarlama bildirimlerini kabul etmişse
-            if (settings.pazarlamaBildirim !== false && userData.fcmToken) {
-                try {
-                    await messaging.send({
-                        token: userData.fcmToken,
-                        notification: {
-                            title: '👋 Seni özledik!',
-                            body: 'Yeni testler ve eşleşmeler seni bekliyor!',
-                        },
-                        data: {
-                            type: 'reminder',
-                        },
-                    });
-                } catch (error) {
-                    console.error('Hatırlatma bildirimi hatası:', error);
-                }
-            }
+    // Preflight request
+    if (req.method === "OPTIONS") {
+      res.status(204).send("");
+      return;
+    }
+
+    const imageUrl = req.query.url;
+
+    if (!imageUrl) {
+      return res.status(400).send("URL parametresi eksik.");
+    }
+
+    try {
+      // HTTP ve HTTPS'e izin ver
+      const response = await axios.get(imageUrl, { 
+        responseType: "arraybuffer",
+        timeout: 10000, // 10 saniye timeout
+        headers: {
+          'Referer': 'https://www.google.com', 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+
+      res.set("Cache-Control", "public, max-age=86400, s-maxage=86400"); // 24 saat cache
+      res.set("Content-Type", response.headers["content-type"] || "image/jpeg");
+      res.send(response.data);
+
+    } catch (error) {
+      console.error("Image Proxy Hatası:", error.message);
+      
+      // Hata durumunda placeholder resim gönder
+      res.set("Content-Type", "image/svg+xml");
+      res.send(`<svg width="200" height="200" xmlns="http://www.w3.org/2000/svg">
+        <rect width="200" height="200" fill="#1C1C1E"/>
+        <text x="100" y="100" text-anchor="middle" fill="#666" font-size="14">Resim Yüklenemedi</text>
+      </svg>`);
+    }
+  }
+);
+
+// ============ ETKİNLİK SÜRESİ KONTROL ============
+exports.checkExpiredEvents = onSchedule(
+  {
+    schedule: "every 5 minutes",
+    timeZone: "Europe/Istanbul",
+  },
+  async (event) => {
+    console.log("Süresi biten etkinlikler kontrol ediliyor...");
+
+    try {
+      const now = admin.firestore.Timestamp.now();
+
+      const expiredEvents = await db
+        .collection("events")
+        .where("endTime", "<", now)
+        .where("isConverted", "==", false)
+        .where("status", "==", "active")
+        .get();
+
+      if (expiredEvents.empty) {
+        console.log("Süresi biten etkinlik yok");
+        return null;
+      }
+
+      console.log(`${expiredEvents.size} etkinlik dönüştürülecek`);
+
+      const batch = db.batch();
+
+      for (const eventDoc of expiredEvents.docs) {
+        const eventData = eventDoc.data();
+        const testId = eventData.testId;
+
+        batch.update(eventDoc.ref, {
+          isConverted: true,
+          status: "completed",
+          convertedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
-        await Promise.all(promises);
-        console.log('Günlük özet bildirimleri gönderildi');
-        
-        return null;
-    });
-
-// ============ TEST İSTATİSTİKLERİ GÜNCELLEME ============
-exports.updateTestStats = functions.firestore
-    .document('turnuvalar/{turnuvaId}')
-    .onCreate(async (snap, context) => {
-        const result = snap.data();
-        const testId = result.testId;
-
-        if (!testId) return null;
-
-        try {
-            await db.collection('testler').doc(testId).update({
-                playCount: admin.firestore.FieldValue.increment(1),
-                lastPlayedAt: admin.firestore.FieldValue.serverTimestamp(),
-            });
-        } catch (error) {
-            console.error('Test istatistik güncelleme hatası:', error);
+        if (testId) {
+          const testRef = db.collection("testler").doc(testId);
+          batch.update(testRef, {
+            isEventTest: false,
+            eventId: null,
+            convertedFromEvent: true,
+            convertedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
         }
 
-        return null;
-    });
+        console.log(`Etkinlik dönüştürüldü: ${eventDoc.id}`);
+      }
 
-// ============ ŞİKAYET BİLDİRİMİ (Admin'e) ============
-exports.onNewReport = functions.firestore
-    .document('reports/{reportId}')
-    .onCreate(async (snap, context) => {
-        const report = snap.data();
-        
-        // Admin topic'ine bildirim gönder
-        try {
-            await messaging.sendToTopic('admin_reports', {
+      await batch.commit();
+      console.log("Tüm etkinlikler dönüştürüldü");
+
+      return null;
+    } catch (error) {
+      console.error("Etkinlik kontrol hatası:", error);
+      return null;
+    }
+  }
+);
+
+// ============ YENİ ETKİNLİK OLUŞTURULDUĞUNDA ============
+exports.onEventCreated = onDocumentCreated(
+  "events/{eventId}",
+  async (event) => {
+    const snapshot = event.data;
+    if (!snapshot) return null;
+
+    try {
+      const eventData = snapshot.data();
+      const testId = eventData.testId;
+      if (testId) {
+        await db.collection("testler").doc(testId).update({ 
+          isEventTest: true, 
+          eventId: event.params.eventId, 
+          eventStartTime: eventData.startTime, 
+          eventEndTime: eventData.endTime 
+        });
+      }
+
+      await snapshot.ref.update({ 
+        isConverted: false, 
+        status: "active", 
+        participantCount: 0, 
+        createdAt: admin.firestore.FieldValue.serverTimestamp() 
+      });
+
+      return null;
+    } catch (error) {
+      console.error("Etkinlik oluşturma hatası:", error);
+      return null;
+    }
+  }
+);
+
+// ============ ETKİNLİK BAŞLADIĞINDA BİLDİRİM ============
+exports.notifyEventStart = onSchedule(
+  {
+    schedule: "every 1 minutes",
+    timeZone: "Europe/Istanbul",
+  },
+  async (event) => {
+    try {
+      const now = admin.firestore.Timestamp.now();
+      const oneMinuteAgo = admin.firestore.Timestamp.fromDate(
+        new Date(Date.now() - 60 * 1000)
+      );
+
+      const startingEvents = await db
+        .collection("events")
+        .where("startTime", ">", oneMinuteAgo)
+        .where("startTime", "<=", now)
+        .where("status", "==", "active")
+        .where("notifiedStart", "==", false)
+        .get();
+
+      if (startingEvents.empty) return null;
+
+      for (const eventDoc of startingEvents.docs) {
+        const eventData = eventDoc.data();
+        const participants = eventData.participants || [];
+
+        for (const userId of participants) {
+          const userDoc = await db.collection("users").doc(userId).get();
+          if (!userDoc.exists) continue;
+
+          const userData = userDoc.data();
+          const fcmToken = userData.fcmToken;
+
+          if (fcmToken) {
+            try {
+              await admin.messaging().send({
+                token: fcmToken,
                 notification: {
-                    title: '🚨 Yeni Şikayet',
-                    body: `${report.reason}: ${report.reportedUserName}`,
+                  title: "🎉 Etkinlik Başladı!",
+                  body: `"${eventData.title}" etkinliği şimdi başladı!`,
                 },
                 data: {
-                    type: 'report',
-                    reportId: context.params.reportId,
+                  type: "event_start",
+                  eventId: eventDoc.id,
+                  testId: eventData.testId || "",
                 },
-            });
-        } catch (error) {
-            console.error('Admin bildirim hatası:', error);
+              });
+            } catch (e) {
+              console.error("Bildirim hatası:", e);
+            }
+          }
         }
 
-        return null;
-    });
+        await eventDoc.ref.update({ notifiedStart: true });
+      }
+
+      return null;
+    } catch (error) {
+      console.error("Etkinlik başlangıç bildirimi hatası:", error);
+      return null;
+    }
+  }
+);
+
+// ============ ETKİNLİK BİTMEDEN 10 DAKİKA ÖNCE UYARI ============
+exports.notifyEventEnding = onSchedule(
+  {
+    schedule: "every 5 minutes",
+    timeZone: "Europe/Istanbul",
+  },
+  async (event) => {
+    try {
+      const tenMinutesLater = admin.firestore.Timestamp.fromDate(
+        new Date(Date.now() + 10 * 60 * 1000)
+      );
+      const fiveMinutesLater = admin.firestore.Timestamp.fromDate(
+        new Date(Date.now() + 5 * 60 * 1000)
+      );
+
+      const endingEvents = await db
+        .collection("events")
+        .where("endTime", ">", fiveMinutesLater)
+        .where("endTime", "<=", tenMinutesLater)
+        .where("status", "==", "active")
+        .where("notifiedEnding", "==", false)
+        .get();
+
+      if (endingEvents.empty) return null;
+
+      for (const eventDoc of endingEvents.docs) {
+        const eventData = eventDoc.data();
+        const participants = eventData.participants || [];
+
+        for (const userId of participants) {
+          const userDoc = await db.collection("users").doc(userId).get();
+          if (!userDoc.exists) continue;
+
+          const userData = userDoc.data();
+          const fcmToken = userData.fcmToken;
+
+          if (fcmToken) {
+            try {
+              await admin.messaging().send({
+                token: fcmToken,
+                notification: {
+                  title: "⏰ Etkinlik Bitiyor!",
+                  body: `"${eventData.title}" 10 dakika içinde bitiyor!`,
+                },
+                data: {
+                  type: "event_ending",
+                  eventId: eventDoc.id,
+                  testId: eventData.testId || "",
+                },
+              });
+            } catch (e) {
+              console.error("Bildirim hatası:", e);
+            }
+          }
+        }
+
+        await eventDoc.ref.update({ notifiedEnding: true });
+      }
+
+      return null;
+    } catch (error) {
+      console.error("Etkinlik bitiş uyarısı hatası:", error);
+      return null;
+    }
+  }
+);
+
+console.log("Functions yüklendi ✓");

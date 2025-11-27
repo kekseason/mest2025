@@ -1,130 +1,45 @@
 name: app_1
 description: "A new Flutter project."
-# The following line prevents the package from being accidentally published to
-# pub.dev using `flutter pub publish`. This is preferred for private packages.
-publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+publish_to: 'none' 
 
-# The following defines the version and build number for your application.
-# A version number is three numbers separated by dots, like 1.2.43
-# followed by an optional build number separated by a +.
-# Both the version and the builder number may be overridden in flutter
-# build by specifying --build-name and --build-number, respectively.
-# In Android, build-name is used as versionName while build-number used as versionCode.
-# Read more about Android versioning at https://developer.android.com/studio/publish/versioning
-# In iOS, build-name is used as CFBundleShortVersionString while build-number is used as CFBundleVersion.
-# Read more about iOS versioning at
-# https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
-# In Windows, build-name is used as the major, minor, and patch parts
-# of the product and file versions while build-number is used as the build suffix.
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.10.0
+  sdk: '>=3.0.0 <4.0.0' # GÜNCEL SDK UYUMU İÇİN
 
-# Dependencies specify other packages that your package needs in order to work.
-# To automatically upgrade your package dependencies to the latest versions
-# consider running `flutter pub upgrade --major-versions`. Alternatively,
-# dependencies can be manually updated by changing the version numbers below to
-# the latest version available on pub.dev. To see which dependencies have newer
-# versions available, run `flutter pub outdated`.
 dependencies:
   flutter:
     sdk: flutter
 
-  # Firebase (mevcut)
-  firebase_core: ^2.24.0
-  firebase_auth: ^4.16.0
-  cloud_firestore: ^4.13.0
-  firebase_storage: ^11.5.0
-  firebase_messaging: ^14.7.10  # YENİ - Push notifications
+  # --- FIREBASE ---
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.1
+  cloud_firestore: ^5.4.4
+  firebase_storage: ^12.3.2
+  firebase_messaging: ^15.1.3
+  # --- GOOGLE AUTH (EKLENDİ) ---
+  google_sign_in: ^6.1.6
 
-  # UI & Fonts (mevcut)
+  # --- UI & FONTS ---
   google_fonts: ^6.1.0
   
-  # Image Picker (mevcut)
-  image_picker: ^1.0.4
-  
-  # YENİ PAKETLER
-  flutter_local_notifications: ^19.5.0  # Local bildirimler
-  shared_preferences: ^2.5.3             # Onboarding state
-  connectivity_plus: ^7.0.0              # İnternet bağlantı kontrolü
-  url_launcher: ^6.3.2                   # URL açma (destek, yasal)
-  
-  # Opsiyonel - Analytics
-  # firebase_analytics: ^10.7.0
-  # firebase_crashlytics: ^3.4.0
-
-
-# iOS için Info.plist eklemeleri (ios/Runner/Info.plist):
-# ---------------------------------------------------------
-# <!-- Camera & Photo Library -->
-# <key>NSCameraUsageDescription</key>
-# <string>Profil fotoğrafı çekmek için kamera izni gerekiyor.</string>
-# <key>NSPhotoLibraryUsageDescription</key>
-# <string>Profil fotoğrafı seçmek için galeri izni gerekiyor.</string>
-#
-# <!-- Push Notifications -->
-# <key>UIBackgroundModes</key>
-# <array>
-#     <string>fetch</string>
-#     <string>remote-notification</string>
-# </array>
-
-
-# Android için AndroidManifest.xml eklemeleri (android/app/src/main/AndroidManifest.xml):
-# ---------------------------------------------------------
-# <uses-permission android:name="android.permission.INTERNET"/>
-# <uses-permission android:name="android.permission.CAMERA"/>
-# <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
-# <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-# <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-# <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-# <uses-permission android:name="android.permission.VIBRATE"/>
-#
-# <!-- application tag içine ekle -->
-# <meta-data
-#     android:name="com.google.firebase.messaging.default_notification_channel_id"
-#     android:value="mest_notifications" />
-
-
-# Firebase Cloud Functions kurulumu için:
-# ---------------------------------------------------------
-# 1. Firebase CLI yükle: npm install -g firebase-tools
-# 2. Firebase'e giriş yap: firebase login
-# 3. Proje dizininde: firebase init functions
-# 4. cloud_functions_index.js içeriğini functions/index.js'e kopyala
-# 5. Deploy: firebase deploy --only functions
-
-
-# Kurulum sonrası:
-# ---------------------------------------------------------
-# flutter pub get
-# cd ios && pod install && cd ..
-# flutter run
+  # --- UTILS ---
+  google_generative_ai: ^0.4.6
+  http: ^1.2.0
+  image_picker: ^1.0.4  
+  shared_preferences: ^2.2.2           
+  connectivity_plus: ^5.0.1            
+  url_launcher: ^6.2.1
+  intl: ^0.18.1  # TARİH FORMATLAMA (EKLENDİ)
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_lints: ^3.0.0
 
-  # The "flutter_lints" package below contains a set of recommended lints to
-  # encourage good coding practices. The lint set provided by the package is
-  # activated in the `analysis_options.yaml` file located at the root of your
-  # package. See that file for information about deactivating specific lint
-  # rules and activating additional ones.
-  flutter_lints: ^6.0.0
-
-# For information on the generic Dart part of this file, see the
-# following page: https://dart.dev/tools/pub/pubspec
-
-# The following section is specific to Flutter packages.
 flutter:
-
-  # The following line ensures that the Material Icons font is
-  # included with your application, so that you can use the icons in
-  # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
   assets:
     - assets/logo.png
     - assets/logo2.png
@@ -136,31 +51,5 @@ flutter:
     - assets/user1.png
     - assets/user2.png
     - assets/mest_logo.png
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
-
-  # An image asset can refer to one or more resolution-specific "variants", see
-  # https://flutter.dev/to/resolution-aware-images
-
-  # For details regarding adding assets from package dependencies, see
-  # https://flutter.dev/to/asset-from-package
-
-  # To add custom fonts to your application, add a fonts section here,
-  # in this "flutter" section. Each entry in this list should have a
-  # "family" key with the font family name, and a "fonts" key with a
-  # list giving the asset and other descriptors for the font. For
-  # example:
-  # fonts:
-  #   - family: Schyler
-  #     fonts:
-  #       - asset: fonts/Schyler-Regular.ttf
-  #       - asset: fonts/Schyler-Italic.ttf
-  #         style: italic
-  #   - family: Trajan Pro
-  #     fonts:
-  #       - asset: fonts/TrajanPro.ttf
-  #       - asset: fonts/TrajanPro_Bold.ttf
-  #         weight: 700
-  #
-  # For details regarding fonts from package dependencies,
-  # see https://flutter.dev/to/font-from-package
+    # - assets/images/mest_logo.png  (Eğer klasör yapın farklıysa bunu aç)
+    
