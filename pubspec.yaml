@@ -30,18 +30,77 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-    
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
-  cloud_firestore: ^6.1.0
-  firebase_auth: ^6.1.2
-  google_fonts: ^6.3.2
-  firebase_storage: ^13.0.4
-  image_picker: ^1.2.1
-  intl: ^0.20.2
-  google_sign_in: ^7.2.0
+  # Firebase (mevcut)
+  firebase_core: ^2.24.0
+  firebase_auth: ^4.16.0
+  cloud_firestore: ^4.13.0
+  firebase_storage: ^11.5.0
+  firebase_messaging: ^14.7.10  # YENİ - Push notifications
+
+  # UI & Fonts (mevcut)
+  google_fonts: ^6.1.0
+  
+  # Image Picker (mevcut)
+  image_picker: ^1.0.4
+  
+  # YENİ PAKETLER
+  flutter_local_notifications: ^19.5.0  # Local bildirimler
+  shared_preferences: ^2.5.3             # Onboarding state
+  connectivity_plus: ^7.0.0              # İnternet bağlantı kontrolü
+  url_launcher: ^6.3.2                   # URL açma (destek, yasal)
+  
+  # Opsiyonel - Analytics
+  # firebase_analytics: ^10.7.0
+  # firebase_crashlytics: ^3.4.0
+
+
+# iOS için Info.plist eklemeleri (ios/Runner/Info.plist):
+# ---------------------------------------------------------
+# <!-- Camera & Photo Library -->
+# <key>NSCameraUsageDescription</key>
+# <string>Profil fotoğrafı çekmek için kamera izni gerekiyor.</string>
+# <key>NSPhotoLibraryUsageDescription</key>
+# <string>Profil fotoğrafı seçmek için galeri izni gerekiyor.</string>
+#
+# <!-- Push Notifications -->
+# <key>UIBackgroundModes</key>
+# <array>
+#     <string>fetch</string>
+#     <string>remote-notification</string>
+# </array>
+
+
+# Android için AndroidManifest.xml eklemeleri (android/app/src/main/AndroidManifest.xml):
+# ---------------------------------------------------------
+# <uses-permission android:name="android.permission.INTERNET"/>
+# <uses-permission android:name="android.permission.CAMERA"/>
+# <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+# <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+# <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+# <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+# <uses-permission android:name="android.permission.VIBRATE"/>
+#
+# <!-- application tag içine ekle -->
+# <meta-data
+#     android:name="com.google.firebase.messaging.default_notification_channel_id"
+#     android:value="mest_notifications" />
+
+
+# Firebase Cloud Functions kurulumu için:
+# ---------------------------------------------------------
+# 1. Firebase CLI yükle: npm install -g firebase-tools
+# 2. Firebase'e giriş yap: firebase login
+# 3. Proje dizininde: firebase init functions
+# 4. cloud_functions_index.js içeriğini functions/index.js'e kopyala
+# 5. Deploy: firebase deploy --only functions
+
+
+# Kurulum sonrası:
+# ---------------------------------------------------------
+# flutter pub get
+# cd ios && pod install && cd ..
+# flutter run
 
 dev_dependencies:
   flutter_test:

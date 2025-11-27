@@ -24,170 +24,301 @@ class CoopSolveScreen extends StatefulWidget {
 
 class _CoopSolveScreenState extends State<CoopSolveScreen> {
   final PageController _pageController = PageController();
-  final String myId = FirebaseAuth.instance.currentUser!.uid;
+  late String myId;
   int _currentQuestionIndex = 0;
   
   // Benim yerel cevap haritam
-  Map<int, int> _myAnswers = {}; 
+  Map<int, int> _myAnswers = {};
+  
+  // 🔴 YENİ: Test verileri için cache
+  Map<String, dynamic>? _testData;
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeUser();
+    _loadTestData();
+  }
+  
+  void _initializeUser() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      myId = user.uid;
+    } else {
+      // Kullanıcı yoksa geri dön
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Oturum hatası. Lütfen tekrar giriş yapın.")),
+        );
+      });
+    }
+  }
+  
+  // 🔴 YENİ: Test verilerini bir kere yükle
+  Future<void> _loadTestData() async {
+    try {
+      var doc = await FirebaseFirestore.instance
+          .collection('testler')
+          .doc(widget.testId)
+          .get();
+          
+      if (doc.exists) {
+        setState(() {
+          _testData = doc.data();
+          _isLoading = false;
+        });
+      } else {
+        setState(() {
+          _errorMessage = "Test bulunamadı";
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _errorMessage = "Hata: $e";
+        _isLoading = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
 
   // --- WIDGET: TEST BÖLÜMÜ (Üst Kısım) ---
-  Widget _buildTestView(AsyncSnapshot<DocumentSnapshot> testSnapshot, Map<String, dynamic> sessionData) {
-    if (!testSnapshot.hasData || !testSnapshot.data!.exists) {
+  Widget _buildTestView(Map<String, dynamic> sessionData) {
+    if (_testData == null) {
       return const Center(child: Text("Test verileri yüklenemedi.", style: TextStyle(color: Colors.white)));
     }
 
-    var testData = testSnapshot.data!.data() as Map<String, dynamic>;
-    List<dynamic> questions = testData['sorular'] ?? [];
+    // 🔴 DÜZELTİLDİ: 'sorular' yerine 'secenekler' kullanılıyor
+    // Co-op modunda seçenekler arasından en sevdiğini seçme mantığı
+    List<dynamic> secenekler = _testData!['secenekler'] ?? [];
 
-    if (questions.isEmpty) {
-      return const Center(child: Text("Testte soru yok.", style: TextStyle(color: Colors.white)));
+    if (secenekler.isEmpty) {
+      return const Center(child: Text("Testte seçenek yok.", style: TextStyle(color: Colors.white)));
     }
 
     // Karşı tarafın anlık cevaplarını çek
-    Map<String, dynamic> otherUserAnswers = sessionData['answers']?[widget.otherUserId] ?? {};
+    Map<String, dynamic> otherUserAnswers = {};
+    if (sessionData['answers'] != null && sessionData['answers'][widget.otherUserId] != null) {
+      otherUserAnswers = Map<String, dynamic>.from(sessionData['answers'][widget.otherUserId]);
+    }
 
-    return PageView.builder(
-      controller: _pageController,
-      physics: const NeverScrollableScrollPhysics(), // Butonlarla kontrol edilecek
-      itemCount: questions.length,
-      onPageChanged: (index) {
-        setState(() {
-          _currentQuestionIndex = index;
-        });
-        // Soru indeksi değişince Firestore'u güncelle
-        _updateSessionIndex(index);
-      },
-      itemBuilder: (context, index) {
-        var question = questions[index];
-        List<dynamic> options = question['secenekler'] ?? [];
-        
-        int? mySelectedOption = _myAnswers[index];
-        // Karşı tarafın o anki soruya verdiği cevap (string index'ten int'e çevriliyor)
-        int? otherSelectedOption = otherUserAnswers['$index'] != null ? int.tryParse(otherUserAnswers['$index'].toString()) : null; 
-
-        return Padding(
-          padding: const EdgeInsets.all(16.0),
+    return Column(
+      children: [
+        // Başlık
+        Padding(
+          padding: const EdgeInsets.all(16),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Soru İlerlemesi
               Text(
-                "Soru ${index + 1} / ${questions.length}", 
-                style: const TextStyle(color: Colors.white70, fontSize: 14)
+                _testData!['baslik'] ?? 'Test',
+                style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 10),
-
-              // Soru Metni
-              Expanded(
-                child: Text(
-                  question['soruMetni'] ?? 'Soru Metni Yüklenemedi.',
-                  style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                  overflow: TextOverflow.visible,
-                ),
-              ),
-              const SizedBox(height: 20),
-
-              // Seçenekler
-              ...options.asMap().entries.map((entry) {
-                int optionIndex = entry.key;
-                String optionText = entry.value.toString();
-                bool isMySelection = mySelectedOption == optionIndex;
-                bool isOtherSelection = otherSelectedOption == optionIndex;
-                
-                // Renk mantığı
-                Color bgColor = const Color(0xFF1C1C1E);
-                if (isMySelection && isOtherSelection) {
-                  bgColor = Colors.green.withOpacity(0.5); // İkisi de aynı
-                } else if (isMySelection) {
-                  bgColor = const Color(0xFFFF5A5F).withOpacity(0.7); // Benim cevabım
-                } else if (isOtherSelection) {
-                  bgColor = Colors.blue.withOpacity(0.7); // Karşı tarafın cevabı
-                }
-
-                return GestureDetector(
-                  onTap: () => _selectAnswer(index, optionIndex),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 250),
-                    margin: const EdgeInsets.only(bottom: 12),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: bgColor,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: isMySelection ? const Color(0xFFFF5A5F) : Colors.transparent, 
-                        width: 1.5
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        // Seçenek Metni
-                        Expanded(
-                          child: Text(
-                            optionText,
-                            style: const TextStyle(color: Colors.white, fontSize: 16),
-                          ),
-                        ),
-                        
-                        // Cevap İndikatörleri (Profil Resimleri)
-                        Row(
-                          children: [
-                            if (isMySelection) 
-                              _buildAnswerIndicator(myId, true),
-                            if (isOtherSelection) 
-                              _buildAnswerIndicator(widget.otherUserId, false),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }).toList(),
-              
-              const SizedBox(height: 20),
-
-              // Navigasyon Butonları
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  if (index > 0)
-                    TextButton.icon(
-                      onPressed: _previousQuestion,
-                      icon: const Icon(Icons.arrow_back_ios, size: 18, color: Colors.white70),
-                      label: const Text("Geri", style: TextStyle(color: Colors.white70)),
-                    ),
-                  
-                  if (index < questions.length - 1)
-                    ElevatedButton(
-                      onPressed: mySelectedOption != null ? _nextQuestion : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: mySelectedOption != null ? const Color(0xFFFF5A5F) : Colors.grey[700],
-                        padding: const EdgeInsets.symmetric(horizontal: 25)
-                      ),
-                      child: const Text("İleri", style: TextStyle(color: Colors.white)),
-                    )
-                  else
-                    ElevatedButton(
-                      onPressed: mySelectedOption != null ? _finishSession : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: mySelectedOption != null ? Colors.green : Colors.grey[700],
-                        padding: const EdgeInsets.symmetric(horizontal: 25)
-                      ),
-                      child: const Text("Bitir ve Gör", style: TextStyle(color: Colors.white)),
-                    ),
-                ],
+              const SizedBox(height: 8),
+              const Text(
+                "Favorilerini seç ve karşılaştır!",
+                style: TextStyle(color: Colors.grey, fontSize: 14),
               ),
             ],
           ),
-        );
-      },
+        ),
+        
+        // İlerleme
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: LinearProgressIndicator(
+                    value: _myAnswers.length / secenekler.length,
+                    backgroundColor: Colors.grey[800],
+                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFFF5A5F)),
+                    minHeight: 8,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                "${_myAnswers.length}/${secenekler.length}",
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+        
+        const SizedBox(height: 16),
+        
+        // Seçenekler Grid
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.all(12),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              childAspectRatio: 0.85,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+            ),
+            itemCount: secenekler.length,
+            itemBuilder: (context, index) {
+              var secenek = secenekler[index];
+              String isim = secenek['isim'] ?? '';
+              String resimUrl = secenek['resimUrl'] ?? secenek['resim'] ?? '';
+              
+              bool isMySelection = _myAnswers.containsKey(index);
+              bool isOtherSelection = otherUserAnswers.containsKey('$index');
+              
+              // Renk mantığı
+              Color borderColor = Colors.transparent;
+              if (isMySelection && isOtherSelection) {
+                borderColor = Colors.green; // İkisi de aynı
+              } else if (isMySelection) {
+                borderColor = const Color(0xFFFF5A5F); // Benim seçimim
+              } else if (isOtherSelection) {
+                borderColor = Colors.blue; // Karşı tarafın seçimi
+              }
+
+              return GestureDetector(
+                onTap: () => _toggleSelection(index),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: borderColor,
+                      width: borderColor == Colors.transparent ? 1 : 3,
+                    ),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        // Resim
+                        Image.network(
+                          resimUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (c, e, s) => Container(
+                            color: Colors.grey[800],
+                            child: const Icon(Icons.image, color: Colors.grey),
+                          ),
+                        ),
+                        // Gradient
+                        Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.transparent,
+                                Colors.black.withOpacity(0.8),
+                              ],
+                            ),
+                          ),
+                        ),
+                        // İsim ve indikatörler
+                        Positioned(
+                          bottom: 8,
+                          left: 8,
+                          right: 8,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                isim,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  if (isMySelection)
+                                    _buildSmallIndicator(const Color(0xFFFF5A5F), "Sen"),
+                                  if (isOtherSelection)
+                                    _buildSmallIndicator(Colors.blue, widget.otherUserName.split(' ')[0]),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        // Seçim işareti
+                        if (isMySelection)
+                          Positioned(
+                            top: 8,
+                            right: 8,
+                            child: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: const BoxDecoration(
+                                color: Color(0xFFFF5A5F),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.check, color: Colors.white, size: 16),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        
+        // Sonuçları Gör butonu
+        if (_myAnswers.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _showResults,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFF5A5F),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text(
+                  "Karşılaştır",
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+  
+  Widget _buildSmallIndicator(Color color, String name) {
+    return Container(
+      margin: const EdgeInsets.only(right: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.8),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        name,
+        style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+      ),
     );
   }
 
   // --- WIDGET: CEVAP İNDİKATÖRÜ ---
-  Widget _buildAnswerIndicator(String userId, bool isMe) {
-    String initial = isMe ? (FirebaseAuth.instance.currentUser?.email?[0] ?? 'S').toUpperCase() : widget.otherUserName[0].toUpperCase();
-    Color color = isMe ? const Color(0xFFFF5A5F) : Colors.blue;
-
+  Widget _buildAnswerIndicator(String name, Color color) {
     return Container(
       width: 28, height: 28,
       margin: const EdgeInsets.only(left: 8),
@@ -198,43 +329,66 @@ class _CoopSolveScreenState extends State<CoopSolveScreen> {
       ),
       child: Center(
         child: Text(
-          initial, 
-          style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)
+          name[0].toUpperCase(),
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
         ),
       ),
     );
   }
-  
-  // --- WIDGET: CHAT BÖLÜMÜ (Alt Kısım) ---
+
+  // --- WIDGET: SOHBET BÖLÜMÜ ---
   Widget _buildChatView() {
     return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
-        border: Border.all(color: Colors.white10),
+      decoration: const BoxDecoration(
+        color: Color(0xFF1C1C1E),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.all(12.0),
-            child: Text(
-              "${widget.otherUserName} ile Sohbet", 
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)
+          // Sohbet başlığı
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 16,
+                  backgroundColor: Colors.blue,
+                  child: Text(
+                    widget.otherUserName[0].toUpperCase(),
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  "${widget.otherUserName} ile Sohbet", 
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)
+                ),
+              ],
             ),
           ),
           const Divider(color: Colors.white10, height: 1),
+          
+          // Mesajlar
           Expanded(
             child: StreamBuilder<QuerySnapshot>(
               stream: FirebaseFirestore.instance
                   .collection('chats').doc(widget.chatId)
                   .collection('messages')
                   .orderBy('createdAt', descending: true)
-                  .limit(10) // Sadece son 10 mesaj
+                  .limit(20)
                   .snapshots(),
               builder: (context, snapshot) {
-                if (!snapshot.hasData) return const Center(child: Text("Yükleniyor...", style: TextStyle(color: Colors.grey)));
+                if (!snapshot.hasData) {
+                  return const Center(child: Text("Yükleniyor...", style: TextStyle(color: Colors.grey)));
+                }
                 
                 var docs = snapshot.data!.docs.reversed.toList();
+                
+                if (docs.isEmpty) {
+                  return const Center(
+                    child: Text("Henüz mesaj yok.\nBir şeyler yaz!", style: TextStyle(color: Colors.grey), textAlign: TextAlign.center),
+                  );
+                }
                 
                 return ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -258,7 +412,7 @@ class _CoopSolveScreenState extends State<CoopSolveScreen> {
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 200), // Mesaj kutusu genişliği
+        constraints: const BoxConstraints(maxWidth: 200),
         margin: const EdgeInsets.only(top: 4, bottom: 4),
         padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
         decoration: BoxDecoration(
@@ -294,6 +448,11 @@ class _CoopSolveScreenState extends State<CoopSolveScreen> {
                 focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(25), borderSide: const BorderSide(color: Color(0xFFFF5A5F))),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               ),
+              onSubmitted: (text) {
+                if (text.trim().isNotEmpty) {
+                  _sendMessage(controller);
+                }
+              },
             ),
           ),
           IconButton(
@@ -305,7 +464,7 @@ class _CoopSolveScreenState extends State<CoopSolveScreen> {
     );
   }
 
-  // --- İŞLEMLER (Firebase Güncellemeleri) ---
+  // --- İŞLEMLER ---
 
   void _sendMessage(TextEditingController controller) async {
     if (controller.text.trim().isEmpty) return;
@@ -325,49 +484,223 @@ class _CoopSolveScreenState extends State<CoopSolveScreen> {
     });
   }
 
-  void _selectAnswer(int questionIndex, int optionIndex) async {
+  void _toggleSelection(int index) async {
     setState(() {
-      _myAnswers[questionIndex] = optionIndex;
+      if (_myAnswers.containsKey(index)) {
+        _myAnswers.remove(index);
+      } else {
+        _myAnswers[index] = 1; // Seçildi
+      }
     });
 
-    // Firestore'da co-op oturumunu güncelle
+    // Firestore'da güncelle
+    Map<String, dynamic> answersUpdate = {};
+    _myAnswers.forEach((key, value) {
+      answersUpdate['$key'] = value;
+    });
+
     await FirebaseFirestore.instance.collection('coop_sessions').doc(widget.sessionId).set({
       'answers': {
-        myId: {
-          '$questionIndex': optionIndex, // Firestore'da anahtarlar string olmalı
-        }
+        myId: answersUpdate,
       }
     }, SetOptions(merge: true));
   }
-  
-  void _updateSessionIndex(int index) {
-    FirebaseFirestore.instance.collection('coop_sessions').doc(widget.sessionId).update({
-      'currentQuestionIndex': index,
-    });
-  }
-  
-  void _nextQuestion() {
-    _pageController.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
-  }
 
-  void _previousQuestion() {
-    _pageController.previousPage(duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
+  void _showResults() {
+    // Sonuçları göster
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
+      ),
+      builder: (context) {
+        return StreamBuilder<DocumentSnapshot>(
+          stream: FirebaseFirestore.instance
+              .collection('coop_sessions')
+              .doc(widget.sessionId)
+              .snapshots(),
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) {
+              return const SizedBox(
+                height: 200,
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            
+            var sessionData = snapshot.data!.data() as Map<String, dynamic>? ?? {};
+            Map<String, dynamic> myAnswers = {};
+            Map<String, dynamic> otherAnswers = {};
+            
+            if (sessionData['answers'] != null) {
+              myAnswers = Map<String, dynamic>.from(sessionData['answers'][myId] ?? {});
+              otherAnswers = Map<String, dynamic>.from(sessionData['answers'][widget.otherUserId] ?? {});
+            }
+            
+            // Ortak seçimleri bul
+            Set<String> myKeys = myAnswers.keys.toSet();
+            Set<String> otherKeys = otherAnswers.keys.toSet();
+            Set<String> commonKeys = myKeys.intersection(otherKeys);
+            
+            int uyumYuzdesi = myKeys.isEmpty ? 0 : ((commonKeys.length / myKeys.length) * 100).round();
+            
+            return Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[600],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  
+                  // Uyum göstergesi
+                  Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      SizedBox(
+                        width: 120,
+                        height: 120,
+                        child: CircularProgressIndicator(
+                          value: uyumYuzdesi / 100,
+                          strokeWidth: 10,
+                          backgroundColor: Colors.grey[800],
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            uyumYuzdesi >= 70 ? Colors.green : 
+                            uyumYuzdesi >= 40 ? Colors.orange : Colors.red,
+                          ),
+                        ),
+                      ),
+                      Column(
+                        children: [
+                          Text(
+                            "%$uyumYuzdesi",
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 32,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const Text("UYUM", style: TextStyle(color: Colors.grey, fontSize: 12)),
+                        ],
+                      ),
+                    ],
+                  ),
+                  
+                  const SizedBox(height: 20),
+                  
+                  Text(
+                    "${widget.otherUserName} ile $commonKeys seçimde ortaksınız!",
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                    textAlign: TextAlign.center,
+                  ),
+                  
+                  const SizedBox(height: 10),
+                  
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _buildStatBox("Senin", myKeys.length, const Color(0xFFFF5A5F)),
+                      const SizedBox(width: 20),
+                      _buildStatBox(widget.otherUserName.split(' ')[0], otherKeys.length, Colors.blue),
+                      const SizedBox(width: 20),
+                      _buildStatBox("Ortak", commonKeys.length, Colors.green),
+                    ],
+                  ),
+                  
+                  const SizedBox(height: 24),
+                  
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFFF5A5F),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text("Tamam", style: TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
-
-  void _finishSession() {
-    // TODO: Burada sonuçları hesapla ve sonucu gösteren bir ekrana yönlendir.
-    Navigator.pop(context);
+  
+  Widget _buildStatBox(String label, int count, Color color) {
+    return Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.2),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            "$count",
+            style: TextStyle(color: color, fontSize: 24, fontWeight: FontWeight.bold),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return Scaffold(
+        backgroundColor: const Color(0xFF0D0D11),
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ),
+        body: const Center(
+          child: CircularProgressIndicator(color: Color(0xFFFF5A5F)),
+        ),
+      );
+    }
+    
+    if (_errorMessage != null) {
+      return Scaffold(
+        backgroundColor: const Color(0xFF0D0D11),
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ),
+        body: Center(
+          child: Text(_errorMessage!, style: const TextStyle(color: Colors.white)),
+        ),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Text("Co-op: ${widget.otherUserName}", style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF0D0D11),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
       ),
+      backgroundColor: const Color(0xFF0D0D11),
       body: StreamBuilder<DocumentSnapshot>(
-        // Co-op oturum verilerini dinle
         stream: FirebaseFirestore.instance.collection('coop_sessions').doc(widget.sessionId).snapshots(),
         builder: (context, sessionSnapshot) {
           if (sessionSnapshot.connectionState == ConnectionState.waiting) {
@@ -379,35 +712,21 @@ class _CoopSolveScreenState extends State<CoopSolveScreen> {
           }
           
           var sessionData = sessionSnapshot.data!.data() as Map<String, dynamic>;
-          
-          // Uygulama yeniden başlatılırsa kendi cevaplarımı Firestore'dan çek
-          _myAnswers = (sessionData['answers']?[myId] as Map? ?? {}).map((k, v) => MapEntry(int.parse(k), v as int));
-          
-          // Test sorularını çek (FutureBuilder, veri stabil olduğu için daha uygun)
-          return FutureBuilder<DocumentSnapshot>(
-            future: FirebaseFirestore.instance.collection('testler').doc(widget.testId).get(),
-            builder: (context, testSnapshot) {
-              if (testSnapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator(color: Color(0xFFFF5A5F)));
-              }
 
-              // --- BÖLÜNMÜŞ EKRAN GÖRÜNÜMÜ ---
-              return Column(
-                children: [
-                  // TEST BÖLÜMÜ (Ekranın 2/3'ü)
-                  Expanded(
-                    flex: 2,
-                    child: _buildTestView(testSnapshot, sessionData),
-                  ),
-                  
-                  // CHAT BÖLÜMÜ (Ekranın 1/3'ü)
-                  Expanded(
-                    flex: 1,
-                    child: _buildChatView(),
-                  ),
-                ],
-              );
-            },
+          return Column(
+            children: [
+              // TEST BÖLÜMÜ (Ekranın 2/3'ü)
+              Expanded(
+                flex: 2,
+                child: _buildTestView(sessionData),
+              ),
+              
+              // CHAT BÖLÜMÜ (Ekranın 1/3'ü)
+              Expanded(
+                flex: 1,
+                child: _buildChatView(),
+              ),
+            ],
           );
         },
       ),
