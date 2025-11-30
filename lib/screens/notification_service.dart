@@ -1,336 +1,343 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-/// Arka plan mesaj handler'ı (main.dart'ta çağrılmalı)
+// ============ BACKGROUND MESSAGE HANDLER ============
+// Bu fonksiyon main.dart'ta tanımlanmalı (top-level)
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  debugPrint("Arka plan bildirimi alındı: ${message.notification?.title}");
+  await Firebase.initializeApp();
+  debugPrint("Arka plan bildirimi: ${message.messageId}");
 }
 
+// ============ BİLDİRİM SERVİSİ ============
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
   NotificationService._internal();
 
   final FirebaseMessaging _messaging = FirebaseMessaging.instance;
+  final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
+  
   bool _isInitialized = false;
+  String? _fcmToken;
+  
+  // Getter
+  String? get fcmToken => _fcmToken;
 
-  /// Servisi başlat
+  // ============ BAŞLATMA ============
   Future<void> initialize() async {
     if (_isInitialized) return;
 
     try {
-      // Bildirim izni iste
-      NotificationSettings settings = await _messaging.requestPermission(
-        alert: true,
-        announcement: false,
-        badge: true,
-        carPlay: false,
-        criticalAlert: false,
-        provisional: false,
-        sound: true,
-      );
+      // 1. İzin iste
+      await _requestPermission();
 
-      debugPrint("Bildirim izni: ${settings.authorizationStatus}");
+      // 2. Local notifications kur
+      await _setupLocalNotifications();
 
-      if (settings.authorizationStatus == AuthorizationStatus.authorized ||
-          settings.authorizationStatus == AuthorizationStatus.provisional) {
-        
-        // FCM Token al ve kaydet
-        await _saveToken();
+      // 3. FCM token al ve kaydet
+      await _getAndSaveToken();
 
-        // Token yenilendiğinde
-        _messaging.onTokenRefresh.listen(_updateToken);
+      // 4. Foreground bildirimleri dinle
+      _setupForegroundListener();
 
-        // Ön plan bildirimleri
-        FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
+      // 5. Bildirime tıklama dinle
+      _setupNotificationTapListener();
 
-        // Bildirime tıklandığında (uygulama arka planda)
-        FirebaseMessaging.onMessageOpenedApp.listen(_handleMessageOpenedApp);
+      // 6. Token yenilenme dinle
+      _setupTokenRefreshListener();
 
-        // Uygulama kapalıyken bildirime tıklandı mı kontrol et
-        RemoteMessage? initialMessage = await _messaging.getInitialMessage();
-        if (initialMessage != null) {
-          _handleMessageOpenedApp(initialMessage);
-        }
-
-        _isInitialized = true;
-        debugPrint("Bildirim servisi başlatıldı ✓");
-      }
+      _isInitialized = true;
+      debugPrint("✅ Bildirim servisi başlatıldı");
     } catch (e) {
-      debugPrint("Bildirim servisi hatası: $e");
+      debugPrint("❌ Bildirim servisi hatası: $e");
     }
   }
 
-  /// FCM Token'ı kaydet
-  Future<void> _saveToken() async {
+  // ============ İZİN İSTE ============
+  Future<void> _requestPermission() async {
+    NotificationSettings settings = await _messaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+      provisional: false,
+      announcement: false,
+      carPlay: false,
+      criticalAlert: false,
+    );
+
+    debugPrint("Bildirim izni: ${settings.authorizationStatus}");
+
+    if (settings.authorizationStatus == AuthorizationStatus.denied) {
+      debugPrint("⚠️ Bildirim izni reddedildi");
+    }
+  }
+
+  // ============ LOCAL NOTIFICATIONS KURULUMU ============
+  Future<void> _setupLocalNotifications() async {
+    // Android ayarları
+    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    
+    // iOS ayarları
+    const iosSettings = DarwinInitializationSettings(
+      requestAlertPermission: true,
+      requestBadgePermission: true,
+      requestSoundPermission: true,
+    );
+
+    const initSettings = InitializationSettings(
+      android: androidSettings,
+      iOS: iosSettings,
+    );
+
+    await _localNotifications.initialize(
+      initSettings,
+      onDidReceiveNotificationResponse: _onNotificationTap,
+    );
+
+    // Android bildirim kanalı oluştur
+    if (Platform.isAndroid) {
+      const channel = AndroidNotificationChannel(
+        'mest_notifications', // ID
+        'Mest Bildirimleri', // İsim
+        description: 'Mest uygulaması bildirimleri',
+        importance: Importance.high,
+        playSound: true,
+        enableVibration: true,
+      );
+
+      await _localNotifications
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+          ?.createNotificationChannel(channel);
+    }
+  }
+
+  // ============ FCM TOKEN AL VE KAYDET ============
+  Future<void> _getAndSaveToken() async {
     try {
-      String? token = await _messaging.getToken();
-      if (token != null) {
-        String? userId = FirebaseAuth.instance.currentUser?.uid;
-        if (userId != null) {
-          await FirebaseFirestore.instance.collection('users').doc(userId).update({
-            'fcmToken': token,
-            'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
-          });
-          debugPrint("FCM Token kaydedildi");
-        }
+      // APNs token (iOS için gerekli)
+      if (Platform.isIOS) {
+        String? apnsToken = await _messaging.getAPNSToken();
+        debugPrint("APNs Token: $apnsToken");
       }
+
+      // FCM Token al
+      _fcmToken = await _messaging.getToken();
+      debugPrint("FCM Token: $_fcmToken");
+
+      // Firestore'a kaydet
+      await _saveTokenToFirestore(_fcmToken);
+    } catch (e) {
+      debugPrint("Token alma hatası: $e");
+    }
+  }
+
+  // ============ TOKEN'I FIRESTORE'A KAYDET ============
+  Future<void> _saveTokenToFirestore(String? token) async {
+    if (token == null) return;
+
+    String? userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(userId).update({
+        'fcmToken': token,
+        'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
+        'platform': Platform.isAndroid ? 'android' : 'ios',
+      });
+      debugPrint("✅ FCM Token Firestore'a kaydedildi");
     } catch (e) {
       debugPrint("Token kaydetme hatası: $e");
     }
   }
 
-  /// Token yenilendiğinde güncelle
-  Future<void> _updateToken(String token) async {
-    try {
-      String? userId = FirebaseAuth.instance.currentUser?.uid;
-      if (userId != null) {
-        await FirebaseFirestore.instance.collection('users').doc(userId).update({
-          'fcmToken': token,
-          'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
-        });
-        debugPrint("FCM Token güncellendi");
-      }
-    } catch (e) {
-      debugPrint("Token güncelleme hatası: $e");
-    }
+  // ============ FOREGROUND BİLDİRİMLERİ DİNLE ============
+  void _setupForegroundListener() {
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      debugPrint("📩 Foreground bildirim: ${message.notification?.title}");
+      
+      // Local notification göster
+      _showLocalNotification(message);
+      
+      // Firestore'a kaydet
+      _saveNotificationToFirestore(message);
+    });
   }
 
-  /// Ön plandayken gelen bildirimler
-  void _handleForegroundMessage(RemoteMessage message) {
-    debugPrint("Ön plan bildirimi: ${message.notification?.title}");
-    
-    // Burada bir snackbar veya dialog gösterebilirsin
-    // Örnek: Global key kullanarak
-    if (navigatorKey.currentContext != null) {
-      _showInAppNotification(
-        navigatorKey.currentContext!,
-        message.notification?.title ?? 'Bildirim',
-        message.notification?.body ?? '',
-        message.data,
-      );
-    }
-  }
+  // ============ LOCAL BİLDİRİM GÖSTER ============
+  Future<void> _showLocalNotification(RemoteMessage message) async {
+    RemoteNotification? notification = message.notification;
+    if (notification == null) return;
 
-  /// Bildirime tıklandığında
-  void _handleMessageOpenedApp(RemoteMessage message) {
-    debugPrint("Bildirime tıklandı: ${message.data}");
-    
-    String? type = message.data['type'];
-    
-    if (navigatorKey.currentContext != null) {
-      switch (type) {
-        case 'message':
-          String? chatId = message.data['chatId'];
-          if (chatId != null) {
-            // Chat ekranına git
-            Navigator.pushNamed(
-              navigatorKey.currentContext!,
-              '/chat',
-              arguments: {'chatId': chatId},
-            );
-          }
-          break;
-        case 'match':
-          // Eşleşmeler ekranına git
-          Navigator.pushNamed(navigatorKey.currentContext!, '/matches');
-          break;
-        case 'badge':
-          // Profil ekranına git
-          Navigator.pushNamed(navigatorKey.currentContext!, '/profile');
-          break;
-        default:
-          // Ana sayfaya git
-          Navigator.pushNamed(navigatorKey.currentContext!, '/home');
-      }
-    }
-  }
+    const androidDetails = AndroidNotificationDetails(
+      'mest_notifications',
+      'Mest Bildirimleri',
+      channelDescription: 'Mest uygulaması bildirimleri',
+      importance: Importance.high,
+      priority: Priority.high,
+      showWhen: true,
+      icon: '@mipmap/ic_launcher',
+    );
 
-  /// Uygulama içi bildirim göster (ön plandayken)
-  void _showInAppNotification(
-    BuildContext context,
-    String title,
-    String body,
-    Map<String, dynamic> data,
-  ) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-            if (body.isNotEmpty)
-              Text(body, style: const TextStyle(fontSize: 12)),
-          ],
-        ),
-        backgroundColor: const Color(0xFF1C1C1E),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.all(16),
-        duration: const Duration(seconds: 4),
-        action: SnackBarAction(
-          label: 'Göster',
-          textColor: const Color(0xFFFF5A5F),
-          onPressed: () {
-            // Bildirime tıklandığında
-            _handleNotificationTap(context, data);
-          },
-        ),
-      ),
+    const iosDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+
+    const details = NotificationDetails(
+      android: androidDetails,
+      iOS: iosDetails,
+    );
+
+    await _localNotifications.show(
+      notification.hashCode,
+      notification.title,
+      notification.body,
+      details,
+      payload: message.data['type'] ?? 'general',
     );
   }
 
-  /// Bildirim tıklama işlemi
-  void _handleNotificationTap(BuildContext context, Map<String, dynamic> data) {
-    String? type = data['type'];
+  // ============ BİLDİRİME TIKLAMA DİNLE ============
+  void _setupNotificationTapListener() {
+    // Uygulama kapalıyken bildirime tıklama
+    FirebaseMessaging.instance.getInitialMessage().then((message) {
+      if (message != null) {
+        _handleNotificationTap(message.data);
+      }
+    });
+
+    // Uygulama arka plandayken bildirime tıklama
+    FirebaseMessaging.onMessageOpenedApp.listen((message) {
+      _handleNotificationTap(message.data);
+    });
+  }
+
+  // ============ LOCAL BİLDİRİME TIKLAMA ============
+  void _onNotificationTap(NotificationResponse response) {
+    debugPrint("Local bildirime tıklandı: ${response.payload}");
+    _handleNotificationTap({'type': response.payload});
+  }
+
+  // ============ BİLDİRİM TIKLAMASI İŞLE ============
+  void _handleNotificationTap(Map<String, dynamic> data) {
+    String type = data['type'] ?? 'general';
+    String? targetId = data['targetId'];
+
+    debugPrint("Bildirim tıklandı - Tip: $type, Hedef: $targetId");
+
+    // NavigatorKey üzerinden yönlendirme yapılabilir
+    // Bu kısım main.dart'ta global navigator key ile çalışır
     
     switch (type) {
-      case 'message':
-        String? chatId = data['chatId'];
-        if (chatId != null) {
-          Navigator.pushNamed(context, '/chat', arguments: {'chatId': chatId});
-        }
-        break;
       case 'match':
-        Navigator.pushNamed(context, '/matches');
+        // Eşleşme ekranına git
+        debugPrint("Eşleşme ekranına yönlendir: $targetId");
+        break;
+      case 'message':
+        // Chat ekranına git
+        debugPrint("Chat ekranına yönlendir: $targetId");
+        break;
+      case 'test_approved':
+        // Testler ekranına git
+        debugPrint("Testler ekranına yönlendir");
+        break;
+      case 'event':
+        // Etkinlik ekranına git
+        debugPrint("Etkinlik ekranına yönlendir: $targetId");
         break;
       default:
-        break;
+        debugPrint("Ana sayfaya yönlendir");
     }
   }
 
-  /// Belirli bir topic'e abone ol
-  Future<void> subscribeToTopic(String topic) async {
+  // ============ TOKEN YENİLENME DİNLE ============
+  void _setupTokenRefreshListener() {
+    _messaging.onTokenRefresh.listen((newToken) {
+      debugPrint("🔄 FCM Token yenilendi");
+      _fcmToken = newToken;
+      _saveTokenToFirestore(newToken);
+    });
+  }
+
+  // ============ BİLDİRİMİ FIRESTORE'A KAYDET ============
+  Future<void> _saveNotificationToFirestore(RemoteMessage message) async {
+    String? userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+
     try {
-      await _messaging.subscribeToTopic(topic);
-      debugPrint("Topic'e abone olundu: $topic");
+      await FirebaseFirestore.instance.collection('notifications').add({
+        'receiverId': userId,
+        'title': message.notification?.title ?? '',
+        'body': message.notification?.body ?? '',
+        'type': message.data['type'] ?? 'general',
+        'targetId': message.data['targetId'],
+        'read': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
     } catch (e) {
-      debugPrint("Topic abonelik hatası: $e");
+      debugPrint("Bildirim kaydetme hatası: $e");
     }
   }
 
-  /// Topic aboneliğini iptal et
-  Future<void> unsubscribeFromTopic(String topic) async {
-    try {
-      await _messaging.unsubscribeFromTopic(topic);
-      debugPrint("Topic aboneliği iptal edildi: $topic");
-    } catch (e) {
-      debugPrint("Topic iptal hatası: $e");
-    }
-  }
+  // ============ ÇIKIŞ YAPARKEN TOKEN SİL ============
+  Future<void> clearTokenOnLogout() async {
+    String? userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
 
-  /// Token'ı sil (çıkış yaparken)
-  Future<void> deleteToken() async {
     try {
-      String? userId = FirebaseAuth.instance.currentUser?.uid;
-      if (userId != null) {
-        await FirebaseFirestore.instance.collection('users').doc(userId).update({
-          'fcmToken': FieldValue.delete(),
-        });
-      }
-      await _messaging.deleteToken();
-      debugPrint("FCM Token silindi");
+      await FirebaseFirestore.instance.collection('users').doc(userId).update({
+        'fcmToken': FieldValue.delete(),
+      });
+      debugPrint("✅ FCM Token silindi");
     } catch (e) {
       debugPrint("Token silme hatası: $e");
     }
   }
-}
 
-/// Global navigator key (main.dart'ta MaterialApp'e ekle)
-final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
-
-// ============ BİLDİRİM GÖNDERİCİ (Firestore üzerinden) ============
-class NotificationSender {
-  /// Yeni mesaj bildirimi gönder
-  static Future<void> sendMessageNotification({
-    required String receiverId,
-    required String senderName,
-    required String message,
-    required String chatId,
-  }) async {
-    try {
-      await FirebaseFirestore.instance.collection('notifications').add({
-        'receiverId': receiverId,
-        'title': '💬 $senderName',
-        'body': message.length > 50 ? '${message.substring(0, 50)}...' : message,
-        'type': 'message',
-        'data': {
-          'chatId': chatId,
-          'senderId': FirebaseAuth.instance.currentUser?.uid,
-        },
-        'read': false,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-    } catch (e) {
-      debugPrint("Bildirim gönderme hatası: $e");
-    }
+  // ============ TOPIC ABONELİKLERİ ============
+  Future<void> subscribeToTopic(String topic) async {
+    await _messaging.subscribeToTopic(topic);
+    debugPrint("✅ Topic'e abone olundu: $topic");
   }
 
-  /// Eşleşme bildirimi gönder
-  static Future<void> sendMatchNotification({
-    required String receiverId,
-    required String matchedUserName,
-    required int compatibility,
-  }) async {
-    try {
-      await FirebaseFirestore.instance.collection('notifications').add({
-        'receiverId': receiverId,
-        'title': '💖 Yeni Eşleşme!',
-        'body': '$matchedUserName ile %$compatibility uyumlusunuz!',
-        'type': 'match',
-        'data': {
-          'senderId': FirebaseAuth.instance.currentUser?.uid,
-        },
-        'read': false,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-    } catch (e) {
-      debugPrint("Bildirim gönderme hatası: $e");
-    }
-  }
-
-  /// Rozet bildirimi gönder
-  static Future<void> sendBadgeNotification({
-    required String receiverId,
-    required String badgeName,
-  }) async {
-    try {
-      await FirebaseFirestore.instance.collection('notifications').add({
-        'receiverId': receiverId,
-        'title': '🏆 Yeni Rozet!',
-        'body': '"$badgeName" rozetini kazandın!',
-        'type': 'badge',
-        'data': {'badgeName': badgeName},
-        'read': false,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-    } catch (e) {
-      debugPrint("Bildirim gönderme hatası: $e");
-    }
+  Future<void> unsubscribeFromTopic(String topic) async {
+    await _messaging.unsubscribeFromTopic(topic);
+    debugPrint("✅ Topic aboneliği iptal edildi: $topic");
   }
 }
 
-// ============ BİLDİRİMLER SAYFASI ============
-class NotificationsScreen extends StatelessWidget {
+// ============ BİLDİRİMLER EKRANI ============
+class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    String? userId = FirebaseAuth.instance.currentUser?.uid;
+  State<NotificationsScreen> createState() => _NotificationsScreenState();
+}
 
+class _NotificationsScreenState extends State<NotificationsScreen> {
+  String? _userId;
+
+  @override
+  void initState() {
+    super.initState();
+    _userId = FirebaseAuth.instance.currentUser?.uid;
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D11),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0D0D11),
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.white, size: 20),
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text(
@@ -340,7 +347,7 @@ class NotificationsScreen extends StatelessWidget {
         centerTitle: true,
         actions: [
           TextButton(
-            onPressed: () => _markAllAsRead(userId),
+            onPressed: _markAllAsRead,
             child: const Text(
               "Tümünü Oku",
               style: TextStyle(color: Color(0xFFFF5A5F), fontSize: 12),
@@ -351,7 +358,7 @@ class NotificationsScreen extends StatelessWidget {
       body: StreamBuilder<QuerySnapshot>(
         stream: FirebaseFirestore.instance
             .collection('notifications')
-            .where('receiverId', isEqualTo: userId)
+            .where('receiverId', isEqualTo: _userId)
             .orderBy('createdAt', descending: true)
             .limit(50)
             .snapshots(),
@@ -366,15 +373,13 @@ class NotificationsScreen extends StatelessWidget {
             return _buildEmptyState();
           }
 
-          var notifications = snapshot.data!.docs;
-
           return ListView.builder(
             padding: const EdgeInsets.all(16),
-            itemCount: notifications.length,
+            itemCount: snapshot.data!.docs.length,
             itemBuilder: (context, index) {
-              var notif = notifications[index].data() as Map<String, dynamic>;
-              String notifId = notifications[index].id;
-              return _buildNotificationCard(context, notifId, notif);
+              var doc = snapshot.data!.docs[index];
+              var data = doc.data() as Map<String, dynamic>;
+              return _buildNotificationCard(doc.id, data);
             },
           );
         },
@@ -382,27 +387,171 @@ class NotificationsScreen extends StatelessWidget {
     );
   }
 
+  Widget _buildNotificationCard(String docId, Map<String, dynamic> data) {
+    String title = data['title'] ?? 'Bildirim';
+    String body = data['body'] ?? '';
+    String type = data['type'] ?? 'general';
+    bool isRead = data['read'] ?? false;
+    DateTime? createdAt = data['createdAt'] != null
+        ? (data['createdAt'] as Timestamp).toDate()
+        : null;
+
+    return GestureDetector(
+      onTap: () => _onNotificationTap(docId, data),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(15),
+        decoration: BoxDecoration(
+          color: isRead 
+              ? const Color(0xFF1C1C1E) 
+              : const Color(0xFFFF5A5F).withOpacity(0.1),
+          borderRadius: BorderRadius.circular(12),
+          border: isRead 
+              ? null 
+              : Border.all(color: const Color(0xFFFF5A5F).withOpacity(0.3)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // İkon
+            Container(
+              width: 45,
+              height: 45,
+              decoration: BoxDecoration(
+                color: _getTypeColor(type).withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                _getTypeIcon(type),
+                color: _getTypeColor(type),
+                size: 22,
+              ),
+            ),
+            const SizedBox(width: 12),
+
+            // İçerik
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          title,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: isRead ? FontWeight.normal : FontWeight.bold,
+                            fontSize: 15,
+                          ),
+                        ),
+                      ),
+                      if (!isRead)
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFFF5A5F),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    body,
+                    style: const TextStyle(color: Colors.grey, fontSize: 13),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (createdAt != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _formatDate(createdAt),
+                      style: TextStyle(color: Colors.grey[600], fontSize: 11),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _onNotificationTap(String docId, Map<String, dynamic> data) async {
+    // Okundu olarak işaretle
+    await FirebaseFirestore.instance
+        .collection('notifications')
+        .doc(docId)
+        .update({'read': true});
+
+    // Yönlendirme yap
+    String type = data['type'] ?? 'general';
+    String? targetId = data['targetId'];
+
+    if (!mounted) return;
+
+    switch (type) {
+      case 'match':
+        // Navigator.push(context, MaterialPageRoute(
+        //   builder: (_) => ChatScreen(matchId: targetId),
+        // ));
+        break;
+      case 'message':
+        // Navigator.push(context, MaterialPageRoute(
+        //   builder: (_) => ChatScreen(chatId: targetId),
+        // ));
+        break;
+      case 'test_approved':
+      case 'test_rejected':
+        // Navigator.push(context, MaterialPageRoute(
+        //   builder: (_) => const MestlerTab(),
+        // ));
+        break;
+      case 'event':
+        // Navigator.push(context, MaterialPageRoute(
+        //   builder: (_) => EventDetailScreen(eventId: targetId),
+        // ));
+        break;
+    }
+  }
+
+  Future<void> _markAllAsRead() async {
+    if (_userId == null) return;
+
+    QuerySnapshot unread = await FirebaseFirestore.instance
+        .collection('notifications')
+        .where('receiverId', isEqualTo: _userId)
+        .where('read', isEqualTo: false)
+        .get();
+
+    WriteBatch batch = FirebaseFirestore.instance.batch();
+    for (var doc in unread.docs) {
+      batch.update(doc.reference, {'read': true});
+    }
+    await batch.commit();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Tüm bildirimler okundu olarak işaretlendi"),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
   Widget _buildEmptyState() {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Container(
-            width: 100,
-            height: 100,
-            decoration: const BoxDecoration(
-              color: Color(0xFF1C1C1E),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(
-              Icons.notifications_none,
-              size: 50,
-              color: Color(0xFFFF5A5F),
-            ),
-          ),
+          Icon(Icons.notifications_none, size: 80, color: Colors.grey[700]),
           const SizedBox(height: 20),
           const Text(
-            "Bildirim yok",
+            "Bildirim Yok",
             style: TextStyle(
               color: Colors.white,
               fontSize: 18,
@@ -410,177 +559,119 @@ class NotificationsScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 10),
-          Text(
+          const Text(
             "Yeni bildirimler burada görünecek",
-            style: TextStyle(color: Colors.grey[400], fontSize: 14),
+            style: TextStyle(color: Colors.grey),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildNotificationCard(
-    BuildContext context,
-    String notifId,
-    Map<String, dynamic> notif,
-  ) {
-    String title = notif['title'] ?? 'Bildirim';
-    String body = notif['body'] ?? '';
-    String type = notif['type'] ?? '';
-    bool isRead = notif['read'] ?? false;
-    Timestamp? timestamp = notif['createdAt'];
-
-    IconData icon;
-    Color iconColor;
-
+  IconData _getTypeIcon(String type) {
     switch (type) {
-      case 'message':
-        icon = Icons.chat_bubble;
-        iconColor = Colors.blue;
-        break;
       case 'match':
-        icon = Icons.favorite;
-        iconColor = const Color(0xFFFF5A5F);
-        break;
-      case 'badge':
-        icon = Icons.emoji_events;
-        iconColor = Colors.amber;
-        break;
+        return Icons.favorite;
+      case 'message':
+        return Icons.chat_bubble;
+      case 'test_approved':
+        return Icons.check_circle;
+      case 'test_rejected':
+        return Icons.cancel;
+      case 'event':
+        return Icons.event;
+      case 'warning':
+        return Icons.warning;
+      case 'streak':
+        return Icons.local_fire_department;
       default:
-        icon = Icons.notifications;
-        iconColor = Colors.grey;
-    }
-
-    return GestureDetector(
-      onTap: () => _onNotificationTap(context, notifId, notif),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: isRead ? const Color(0xFF1C1C1E) : const Color(0xFF2C2C2E),
-          borderRadius: BorderRadius.circular(12),
-          border: isRead
-              ? null
-              : Border.all(color: const Color(0xFFFF5A5F).withOpacity(0.3)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 45,
-              height: 45,
-              decoration: BoxDecoration(
-                color: iconColor.withOpacity(0.2),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(icon, color: iconColor, size: 22),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: isRead ? FontWeight.normal : FontWeight.bold,
-                      fontSize: 14,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    body,
-                    style: TextStyle(color: Colors.grey[400], fontSize: 12),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (timestamp != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Text(
-                        _formatTime(timestamp.toDate()),
-                        style: TextStyle(color: Colors.grey[600], fontSize: 10),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            if (!isRead)
-              Container(
-                width: 8,
-                height: 8,
-                decoration: const BoxDecoration(
-                  color: Color(0xFFFF5A5F),
-                  shape: BoxShape.circle,
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _onNotificationTap(
-    BuildContext context,
-    String notifId,
-    Map<String, dynamic> notif,
-  ) async {
-    // Okundu işaretle
-    await FirebaseFirestore.instance
-        .collection('notifications')
-        .doc(notifId)
-        .update({'read': true});
-
-    // İlgili sayfaya git
-    String type = notif['type'] ?? '';
-    Map<String, dynamic> data = notif['data'] ?? {};
-
-    if (context.mounted) {
-      switch (type) {
-        case 'message':
-          String? chatId = data['chatId'];
-          if (chatId != null) {
-            Navigator.pushNamed(context, '/chat', arguments: {'chatId': chatId});
-          }
-          break;
-        case 'match':
-          Navigator.pushNamed(context, '/matches');
-          break;
-        case 'badge':
-          Navigator.pushNamed(context, '/profile');
-          break;
-      }
+        return Icons.notifications;
     }
   }
 
-  void _markAllAsRead(String? userId) async {
-    if (userId == null) return;
+  Color _getTypeColor(String type) {
+    switch (type) {
+      case 'match':
+        return Colors.pink;
+      case 'message':
+        return Colors.blue;
+      case 'test_approved':
+        return Colors.green;
+      case 'test_rejected':
+        return Colors.red;
+      case 'event':
+        return Colors.purple;
+      case 'warning':
+        return Colors.orange;
+      case 'streak':
+        return Colors.orange;
+      default:
+        return const Color(0xFFFF5A5F);
+    }
+  }
 
-    try {
-      QuerySnapshot unreadNotifs = await FirebaseFirestore.instance
+  String _formatDate(DateTime date) {
+    Duration diff = DateTime.now().difference(date);
+    if (diff.inMinutes < 1) return "Şimdi";
+    if (diff.inMinutes < 60) return "${diff.inMinutes} dk önce";
+    if (diff.inHours < 24) return "${diff.inHours} saat önce";
+    if (diff.inDays < 7) return "${diff.inDays} gün önce";
+    return "${date.day}/${date.month}/${date.year}";
+  }
+}
+
+// ============ OKUNMAMIŞ BİLDİRİM SAYACI ============
+class UnreadNotificationBadge extends StatelessWidget {
+  final Widget child;
+  
+  const UnreadNotificationBadge({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    String? userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return child;
+
+    return StreamBuilder<QuerySnapshot>(
+      stream: FirebaseFirestore.instance
           .collection('notifications')
           .where('receiverId', isEqualTo: userId)
           .where('read', isEqualTo: false)
-          .get();
+          .snapshots(),
+      builder: (context, snapshot) {
+        int count = snapshot.data?.docs.length ?? 0;
 
-      WriteBatch batch = FirebaseFirestore.instance.batch();
-      for (var doc in unreadNotifs.docs) {
-        batch.update(doc.reference, {'read': true});
-      }
-      await batch.commit();
-    } catch (e) {
-      debugPrint("Toplu okundu işaretleme hatası: $e");
-    }
-  }
-
-  String _formatTime(DateTime date) {
-    Duration diff = DateTime.now().difference(date);
-
-    if (diff.inMinutes < 1) return 'Az önce';
-    if (diff.inMinutes < 60) return '${diff.inMinutes} dk önce';
-    if (diff.inHours < 24) return '${diff.inHours} saat önce';
-    if (diff.inDays < 7) return '${diff.inDays} gün önce';
-
-    return '${date.day}/${date.month}/${date.year}';
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            child,
+            if (count > 0)
+              Positioned(
+                right: -5,
+                top: -5,
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFFF5A5F),
+                    shape: BoxShape.circle,
+                  ),
+                  constraints: const BoxConstraints(
+                    minWidth: 18,
+                    minHeight: 18,
+                  ),
+                  child: Text(
+                    count > 99 ? "99+" : "$count",
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
   }
 }

@@ -6,6 +6,9 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:google_fonts/google_fonts.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'firebase_options.dart';
+import 'screens/notification_service.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+
 
 // EKRANLAR
 import 'screens/welcome_screen.dart';
@@ -14,6 +17,20 @@ import 'screens/admin_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/notification_service.dart';
+import 'screens/chat_screen.dart';
+import 'screens/matches_screen.dart';
+import 'screens/profile_tab.dart';
+import 'screens/user_profile_screen.dart';
+
+// ============ GLOBAL NAVIGATOR KEY ============
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
+// ============ BACKGROUND MESSAGE HANDLER ============
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  debugPrint("📩 Arka plan bildirimi: ${message.notification?.title}");
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,6 +39,7 @@ void main() async {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
     // Offline persistence etkinleştir
     FirebaseFirestore.instance.settings = const Settings(
@@ -62,11 +80,16 @@ class _MestAppState extends State<MestApp> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // İnternet bağlantısı kontrolü
+  // İnternet bağlantısı kontrolü - 🔴 DÜZELTİLDİ
   void _initConnectivity() {
     Connectivity().onConnectivityChanged.listen((result) {
       setState(() {
-        _isOffline = result == ConnectivityResult.none;
+        // connectivity_plus yeni versiyonları List döndürür
+        if (result is List) {
+          _isOffline = (result as List).contains(ConnectivityResult.none) || (result as List).isEmpty;
+        } else {
+          _isOffline = result == ConnectivityResult.none;
+        }
       });
     });
   }
@@ -100,6 +123,52 @@ class _MestAppState extends State<MestApp> with WidgetsBindingObserver {
       debugShowCheckedModeBanner: false,
       title: 'Mest',
       theme: _buildTheme(context),
+      
+      // 🔴 YENİ: Navigator Key eklendi (bildirimler için)
+      navigatorKey: navigatorKey,
+      
+      // 🔴 YENİ: Named Routes tanımlandı
+      routes: {
+        '/home': (context) => const MainNavigation(),
+        '/matches': (context) => const MatchesScreen(),
+        '/profile': (context) => const ProfileTab(),
+      },
+      
+      // 🔴 YENİ: Dinamik route'lar için onGenerateRoute
+      onGenerateRoute: (settings) {
+        // /chat route'u - arguments ile chatId, otherUserId, otherUserName alır
+        if (settings.name == '/chat') {
+          final args = settings.arguments as Map<String, dynamic>?;
+          if (args != null) {
+            return MaterialPageRoute(
+              builder: (context) => ChatScreen(
+                chatId: args['chatId'] ?? '',
+                otherUserId: args['otherUserId'] ?? '',
+                otherUserName: args['otherUserName'] ?? 'Kullanıcı',
+              ),
+            );
+          }
+          // Args yoksa ana sayfaya dön
+          return MaterialPageRoute(builder: (context) => const MainNavigation());
+        }
+        
+        // /user-profile route'u
+        if (settings.name == '/user-profile') {
+          final args = settings.arguments as Map<String, dynamic>?;
+          if (args != null) {
+            return MaterialPageRoute(
+              builder: (context) => UserProfileScreen(
+                userId: args['userId'] ?? '',
+                userName: args['userName'] ?? 'Kullanıcı',
+              ),
+            );
+          }
+        }
+        
+        // Bilinmeyen route - ana sayfaya yönlendir
+        return MaterialPageRoute(builder: (context) => const MainNavigation());
+      },
+      
       builder: (context, child) {
         return Stack(
           children: [
@@ -308,6 +377,7 @@ class _NotificationWrapperState extends State<NotificationWrapper> {
         var data = doc.data();
         _showMatchPopup(
           data['gonderenIsim'] ?? 'Biri',
+          data['gonderenId'] ?? '',  // 🔴 YENİ: gonderenId eklendi
           data['uyum'] ?? 0,
           data['mesaj'] ?? '',
         );
@@ -316,7 +386,8 @@ class _NotificationWrapperState extends State<NotificationWrapper> {
     });
   }
 
-  void _showMatchPopup(String isim, int uyum, String mesaj) {
+  // 🔴 DÜZELTİLDİ: Chat navigation eklendi
+  void _showMatchPopup(String isim, String gonderenId, int uyum, String mesaj) {
     if (!mounted) return;
 
     showDialog(
@@ -388,9 +459,10 @@ class _NotificationWrapperState extends State<NotificationWrapper> {
               ),
               Expanded(
                 child: ElevatedButton(
+                  // 🔴 DÜZELTİLDİ: Chat'e yönlendirme eklendi
                   onPressed: () {
                     Navigator.pop(context);
-                    // Chat'e yönlendir (TODO: implement navigation)
+                    _openChatWithUser(gonderenId, isim);
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFFF5A5F),
@@ -404,6 +476,52 @@ class _NotificationWrapperState extends State<NotificationWrapper> {
         ],
       ),
     );
+  }
+
+  // 🔴 YENİ: Chat açma fonksiyonu
+  Future<void> _openChatWithUser(String otherUserId, String otherUserName) async {
+    if (otherUserId.isEmpty) return;
+    
+    String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) return;
+
+    // Chat ID oluştur (alfabetik sıralama ile tutarlılık)
+    String chatId = currentUserId.compareTo(otherUserId) < 0
+        ? '${currentUserId}_$otherUserId'
+        : '${otherUserId}_$currentUserId';
+
+    try {
+      // Chat var mı kontrol et, yoksa oluştur
+      DocumentSnapshot chatDoc = await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .get();
+
+      if (!chatDoc.exists) {
+        await FirebaseFirestore.instance.collection('chats').doc(chatId).set({
+          'users': [currentUserId, otherUserId],
+          'createdAt': FieldValue.serverTimestamp(),
+          'lastMessage': '',
+          'lastMessageTime': FieldValue.serverTimestamp(),
+        });
+      }
+
+      // Chat ekranına git
+      if (mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ChatScreen(
+              chatId: chatId,
+              otherUserId: otherUserId,
+              otherUserName: otherUserName,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("Chat açma hatası: $e");
+    }
   }
 
   @override
